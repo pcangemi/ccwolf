@@ -286,6 +286,21 @@ pub fn describe(lang: Lang, e: &Event, viewer: usize, players: &[PlayerInfo]) ->
     })
 }
 
+fn jev_line(lang: Lang, v: &crate::game::Verdict, players: &[PlayerInfo]) -> String {
+    let ui = lang.ui();
+    let mut parts = vec![format!("{} {:.0}{}", ui.lie, v.lie * 100.0, if lang == Lang::Fr { "\u{a0}%" } else { "%" })];
+    if let Some(c) = v.convincing {
+        parts.push(format!("{c:.1}/5"));
+    }
+    if let Some(role) = v.claim {
+        parts.push(format!("{} {}", ui.claims, ui.role(role)));
+    }
+    if let Some(a) = v.accuses {
+        parts.push(format!("{} {}", if lang == Lang::Fr { "accuse" } else { "accuses" }, players[a].name));
+    }
+    format!("    jev: {}", parts.join(", "))
+}
+
 pub fn narrate(lang: Lang, e: &Event, players: &[PlayerInfo]) -> Vec<String> {
     let fr = lang == Lang::Fr;
     let tag = |p: usize| format!("{} [{}, {}]", players[p].name, players[p].model.label(), lang.ui().role(players[p].role));
@@ -305,6 +320,9 @@ pub fn narrate(lang: Lang, e: &Event, players: &[PlayerInfo]) -> Vec<String> {
             line = line.replacen(&players[*player].name, &tag(*player), 1);
             lines.push(line);
             lines.extend(thought(t));
+            if let Event::Speech { verdict: Some(v), .. } | Event::LastWords { verdict: Some(v), .. } = e {
+                lines.push(jev_line(lang, v, players));
+            }
         }
         Event::WolfPick { thought: t, .. } | Event::Vote { thought: t, .. } => {
             lines.extend(describe(lang, e, usize::MAX, players));
@@ -370,7 +388,7 @@ mod tests {
     #[test]
     fn players_hear_speeches_but_never_thoughts() {
         let players = table(Lang::En);
-        let e = Event::Speech { player: 2, round: 1, thought: "I am the wolf".into(), say: "Good morning".into() };
+        let e = Event::Speech { player: 2, round: 1, thought: "I am the wolf".into(), say: "Good morning".into(), verdict: None };
         let line = describe(Lang::En, &e, 5, &players).unwrap();
         assert!(line.contains("Good morning"));
         assert!(!line.contains("I am the wolf"));

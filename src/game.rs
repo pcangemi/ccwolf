@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::lang::Lang;
@@ -34,22 +36,83 @@ pub struct PlayerInfo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
-    Setup { version: String, seed: u64, lang: Lang, players: Vec<PlayerInfo> },
-    Night { day: u32 },
-    WolfTalk { player: usize, thought: String, say: String },
-    WolfPick { player: usize, target: usize, thought: String },
-    Pack { target: usize },
-    SeerLook { player: usize, target: usize, wolf: bool, thought: String },
-    Witch { player: usize, victim: Option<usize>, save: bool, poison: Option<usize>, thought: String },
-    Dawn { day: u32, deaths: Vec<usize> },
-    Speech { player: usize, round: u32, thought: String, say: String },
-    Vote { player: usize, target: usize, thought: String },
-    Verdict { eliminated: Option<usize>, tally: Vec<u32> },
-    LastWords { player: usize, thought: String, say: String },
-    Thinking { player: usize },
-    Usage { player: usize, usage: Usage, cost: f64 },
-    GameOver { winner: Team },
-    Aborted { reason: String },
+    Setup {
+        version: String,
+        seed: u64,
+        lang: Lang,
+        players: Vec<PlayerInfo>,
+    },
+    Night {
+        day: u32,
+    },
+    WolfTalk {
+        player: usize,
+        thought: String,
+        say: String,
+    },
+    WolfPick {
+        player: usize,
+        target: usize,
+        thought: String,
+    },
+    Pack {
+        target: usize,
+    },
+    SeerLook {
+        player: usize,
+        target: usize,
+        wolf: bool,
+        thought: String,
+    },
+    Witch {
+        player: usize,
+        victim: Option<usize>,
+        save: bool,
+        poison: Option<usize>,
+        thought: String,
+    },
+    Dawn {
+        day: u32,
+        deaths: Vec<usize>,
+    },
+    Speech {
+        player: usize,
+        round: u32,
+        thought: String,
+        say: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdict: Option<Verdict>,
+    },
+    Vote {
+        player: usize,
+        target: usize,
+        thought: String,
+    },
+    Verdict {
+        eliminated: Option<usize>,
+        tally: Vec<u32>,
+    },
+    LastWords {
+        player: usize,
+        thought: String,
+        say: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdict: Option<Verdict>,
+    },
+    Thinking {
+        player: usize,
+    },
+    Usage {
+        player: usize,
+        usage: Usage,
+        cost: f64,
+    },
+    GameOver {
+        winner: Team,
+    },
+    Aborted {
+        reason: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +181,31 @@ pub trait Agent: Send {
     fn act(&mut self, news: &[String], task: &Task) -> Result<Reply, String>;
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Verdict {
+    pub lie: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convincing: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<Role>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accuses: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Testimony {
+    pub speaker: String,
+    pub role: Role,
+    pub knows: Vec<String>,
+    pub recent: Vec<String>,
+    pub speech: String,
+    pub names: Vec<String>,
+}
+
+pub trait Judge: Send + Sync {
+    fn judge(&self, testimony: &Testimony) -> Option<Verdict>;
+}
+
 pub fn deal(seed: u64, lang: Lang, lineup: &[Model]) -> Vec<PlayerInfo> {
     let ui = lang.ui();
     let mut rng = Rng::new(seed);
@@ -148,6 +236,7 @@ pub struct Engine {
     heal_left: bool,
     poison_left: bool,
     rng: Rng,
+    judge: Option<Arc<dyn Judge>>,
 }
 
 type Emit<'a> = &'a mut dyn FnMut(&Event);
@@ -166,7 +255,55 @@ impl Engine {
             heal_left: true,
             poison_left: true,
             rng: Rng::new(seed ^ 0xC0FFEE),
+            judge: None,
         }
+    }
+
+    pub fn judged_by(mut self, judge: Option<Arc<dyn Judge>>) -> Self {
+        self.judge = judge;
+        self
+    }
+
+    pub fn testimony(&self, p: usize, speech: &str) -> Testimony {
+        let players = &self.players;
+        let mut knows: Vec<String> = Vec::new();
+        if players[p].role == Role::Wolf {
+            for q in (0..players.len()).filter(|&q| q != p && players[q].role == Role::Wolf) {
+                knows.push(match self.lang {
+                    Lang::Fr => format!("{} est aussi loup-garou.", players[q].name),
+                    Lang::En => format!("{} is also a werewolf.", players[q].name),
+                });
+            }
+        }
+        let private = self
+            .log
+            .iter()
+            .filter(|e| matches!(e.audience(), Audience::Wolves | Audience::Only(_)) && e.visible_to(p, players))
+            .filter_map(|e| crate::prompts::describe(self.lang, e, p, players));
+        knows.extend(private);
+        let start = knows.len().saturating_sub(12);
+        let mut recent: Vec<String> = self
+            .log
+            .iter()
+            .rev()
+            .filter(|e| e.audience() == Audience::All)
+            .filter_map(|e| crate::prompts::describe(self.lang, e, p, players))
+            .take(8)
+            .collect();
+        recent.reverse();
+        Testimony {
+            speaker: players[p].name.clone(),
+            role: players[p].role,
+            knows: knows[start..].to_vec(),
+            recent,
+            speech: speech.to_string(),
+            names: players.iter().map(|x| x.name.clone()).collect(),
+        }
+    }
+
+    fn verdict(&self, p: usize, speech: &str) -> Option<Verdict> {
+        let judge = self.judge.as_ref()?;
+        judge.judge(&self.testimony(p, speech))
     }
 
     pub fn run(mut self, emit: Emit) -> Option<Team> {
@@ -368,7 +505,8 @@ impl Engine {
             for &p in &order {
                 self.push(Event::Thinking { player: p }, emit);
                 let (thought, say) = speech_of(self.ask(p, Task::Speak { day, round }, emit)?);
-                self.push(Event::Speech { player: p, round, thought, say }, emit);
+                let verdict = self.verdict(p, &say);
+                self.push(Event::Speech { player: p, round, thought, say, verdict }, emit);
             }
         }
 
@@ -391,7 +529,8 @@ impl Engine {
         if let Some(p) = eliminated {
             self.alive[p] = false;
             let (thought, say) = speech_of(self.ask(p, Task::LastWords, emit)?);
-            self.push(Event::LastWords { player: p, thought, say }, emit);
+            let verdict = self.verdict(p, &say);
+            self.push(Event::LastWords { player: p, thought, say, verdict }, emit);
         }
         Ok(())
     }
@@ -564,7 +703,7 @@ mod tests {
         }
         assert!(secret[0].visible_to(wolf, &players));
         assert!(secret[2].visible_to(seer, &players));
-        assert!(Event::Speech { player: wolf, round: 1, thought: "secret".into(), say: "x".into() }.visible_to(villager, &players));
+        assert!(Event::Speech { player: wolf, round: 1, thought: "secret".into(), say: "x".into(), verdict: None }.visible_to(villager, &players));
     }
 
     #[test]
@@ -572,5 +711,41 @@ mod tests {
         assert_eq!(majority(&[3, 5]), Some(3));
         assert_eq!(majority(&[3, 5, 5]), Some(5));
         assert_eq!(majority(&[]), None);
+    }
+
+    struct Recorder(std::sync::Mutex<Vec<Testimony>>);
+
+    impl Judge for Recorder {
+        fn judge(&self, t: &Testimony) -> Option<Verdict> {
+            self.0.lock().unwrap().push(t.clone());
+            Some(Verdict { lie: 0.5, convincing: None, claim: None, accuses: None })
+        }
+    }
+
+    #[test]
+    fn the_judge_sees_what_the_speaker_knows_and_nothing_more() {
+        let seed = 9;
+        let players = deal(seed, Lang::Fr, &lineup("mixed").unwrap());
+        let agents: Vec<Box<dyn Agent>> = (0..SEATS).map(|i| Box::new(ScriptedAgent::new(seed, i)) as Box<dyn Agent>).collect();
+        let judge = Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+        let mut events = Vec::new();
+        Engine::new(seed, Lang::Fr, players.clone(), agents).judged_by(Some(judge.clone())).run(&mut |e: &Event| events.push(e.clone()));
+        let heard = judge.0.lock().unwrap();
+        assert!(!heard.is_empty());
+        for t in heard.iter() {
+            let role = players.iter().find(|p| p.name == t.speaker).unwrap().role;
+            assert_eq!(t.role, role);
+            let private = t.knows.join(" ");
+            if role != Role::Wolf {
+                assert!(!private.contains("(Loups)") && !private.contains("aussi loup-garou"), "{private}");
+            }
+            if role != Role::Seer {
+                assert!(!private.contains("Ta vision"), "{private}");
+            }
+            assert!(t.recent.len() <= 8 && t.knows.len() <= 12);
+        }
+        let judged = events.iter().filter(|e| matches!(e, Event::Speech { verdict: Some(_), .. })).count();
+        let speeches = events.iter().filter(|e| matches!(e, Event::Speech { .. })).count();
+        assert_eq!(judged, speeches);
     }
 }

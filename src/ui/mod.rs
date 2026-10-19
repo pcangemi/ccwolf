@@ -14,7 +14,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
-use crate::game::{Event, PlayerInfo, Role, Team};
+use crate::game::{Event, PlayerInfo, Role, Team, Verdict};
 use crate::lang::{Lang, Ui};
 use crate::model::Model;
 use canvas::{Rgb, label};
@@ -44,6 +44,7 @@ pub struct Options {
     pub speed: f32,
     pub lineup: Vec<Model>,
     pub replay: bool,
+    pub jev: bool,
 }
 
 fn role_color(role: Role) -> Rgb {
@@ -71,6 +72,7 @@ struct Panel {
     thought: String,
     accent: Rgb,
     start: f32,
+    verdict: Option<Verdict>,
 }
 
 struct Banner {
@@ -121,6 +123,7 @@ struct App {
     speed: f32,
     replay: bool,
     lineup: Vec<Model>,
+    jev: bool,
     quit: bool,
 }
 
@@ -162,6 +165,7 @@ impl App {
             speed: opts.speed,
             replay: opts.replay,
             lineup: opts.lineup,
+            jev: opts.jev,
             quit: false,
         }
     }
@@ -214,8 +218,19 @@ impl App {
 
     fn open_panel(&mut self, title: &str, who: Option<usize>, say: String, thought: String, accent: Rgb) -> f32 {
         let dur = self.typing_time(&say, &thought);
-        self.panel = Some(Panel { title: title.to_string(), who, say, thought, accent, start: self.clock });
+        self.panel = Some(Panel { title: title.to_string(), who, say, thought, accent, start: self.clock, verdict: None });
         dur
+    }
+
+    fn attach(&mut self, verdict: Option<Verdict>, dur: f32) -> f32 {
+        let Some(v) = verdict else { return dur };
+        if let Some(target) = v.accuses {
+            self.mark = Some((target, Rgb(255.0, 150.0, 60.0)));
+        }
+        if let Some(p) = &mut self.panel {
+            p.verdict = Some(v);
+        }
+        dur + 1.2
     }
 
     fn banner(&mut self, text: String, dur: f32) {
@@ -328,13 +343,14 @@ impl App {
                 }
                 3.8
             }
-            Event::Speech { player, round, thought, say } => {
+            Event::Speech { player, round, thought, say, verdict } => {
                 self.thinking = None;
                 self.speaker = Some(player);
                 self.mark = None;
                 self.log(format!("{} : {}", self.name(player), say), Rgb::from(self.players[player].model.rgb()).mix(TEXT, 0.4));
                 let title = format!("{} {}", ui.village_square, if round == 2 { "· 2" } else { "" });
-                self.open_panel(title.trim_end(), Some(player), say, thought, Rgb::from(self.players[player].model.rgb()))
+                let dur = self.open_panel(title.trim_end(), Some(player), say, thought, Rgb::from(self.players[player].model.rgb()));
+                self.attach(verdict, dur)
             }
             Event::Vote { player, target, thought } => {
                 self.voting = true;
@@ -374,10 +390,11 @@ impl App {
                 }
                 3.0
             }
-            Event::LastWords { player, thought, say } => {
+            Event::LastWords { player, thought, say, verdict } => {
                 self.speaker = Some(player);
                 self.log(format!("{} : {}", self.name(player), say), DIM);
-                self.open_panel(ui.last_words, Some(player), say, thought, Rgb(200.0, 200.0, 210.0))
+                let dur = self.open_panel(ui.last_words, Some(player), say, thought, Rgb(200.0, 200.0, 210.0));
+                self.attach(verdict, dur)
             }
             Event::Thinking { player } => {
                 self.thinking = Some(player);
@@ -515,9 +532,13 @@ impl App {
             let tag = format!("[ {} ]", self.ui.replay_tag);
             label(buf, center(&tag), below + 3, &tag, Rgb(255.0, 200.0, 90.0), true, area);
         }
+        if self.jev && !self.replay {
+            let text = self.ui.jev_on;
+            label(buf, center(text), below + 4, text, Rgb(255.0, 150.0, 60.0), false, area);
+        }
         if (self.anim * 1.6).sin() > -0.3 {
             let press = self.ui.press_enter;
-            label(buf, center(press), below + 5, press, Rgb(255.0, 214.0, 120.0), true, area);
+            label(buf, center(press), below + 6, press, Rgb(255.0, 214.0, 120.0), true, area);
         }
         let keys = self.ui.keys;
         label(buf, center(keys), area.bottom() as i32 - 1, keys, DIM, false, area);
@@ -621,16 +642,47 @@ impl App {
         }
     }
 
+    fn gauge(&self, p: &Panel) -> Option<Line<'static>> {
+        let v = p.verdict.as_ref()?;
+        let done_at = p.start + p.say.chars().count() as f32 / CPS;
+        let k = ((self.clock - done_at) / 0.9).clamp(0.0, 1.0);
+        if k <= 0.0 {
+            return None;
+        }
+        let value = v.lie * (1.0 - (1.0 - k).powi(3));
+        let color = canvas::ramp(&[(0.0, WITCH_GREEN), (0.5, GOLD), (1.0, WOLF_RED)], value);
+        let cells = 12;
+        let filled = (value * cells as f32).round() as usize;
+        let pct = (value * 100.0).round() as u32;
+        let label = match self.lang {
+            Lang::Fr => format!(" {pct}\u{a0}% {} ", self.ui.lie),
+            Lang::En => format!(" {pct}% {} ", self.ui.lie),
+        };
+        let mut spans = vec![
+            Span::styled(format!(" {} ", self.ui.lie_detector), fg(DIM).add_modifier(Modifier::BOLD)),
+            Span::styled("\u{2588}".repeat(filled), fg(color)),
+            Span::styled("\u{2591}".repeat(cells - filled), fg(DIM.scale(0.6))),
+            Span::styled(label, fg(color).add_modifier(Modifier::BOLD)),
+        ];
+        if let Some(role) = v.claim.filter(|_| k >= 1.0) {
+            spans.push(Span::styled(format!("· {} {} ", self.ui.claims, self.ui.role(role)), fg(role_color(role))));
+        }
+        Some(Line::from(spans).alignment(Alignment::Right))
+    }
+
     fn draw_panels(&self, f: &mut Frame, speech_area: Rect, thought_area: Rect) {
         let (title, accent) = match &self.panel {
             Some(p) => (p.title.clone(), p.accent),
             None => (self.ui.village_square.to_string(), DIM),
         };
-        let block = Block::bordered()
+        let mut block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(fg(accent))
             .title(Span::styled(format!(" {title} "), fg(accent).add_modifier(Modifier::BOLD)))
             .style(Style::new().bg(PANEL.color()));
+        if let Some(gauge) = self.panel.as_ref().and_then(|p| self.gauge(p)) {
+            block = block.title_bottom(gauge);
+        }
         let thought_block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(fg(THOUGHT.scale(0.7)))
@@ -842,18 +894,29 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    struct RoleJudge;
+
+    impl crate::game::Judge for RoleJudge {
+        fn judge(&self, t: &crate::game::Testimony) -> Option<Verdict> {
+            let wolf = t.role == Role::Wolf;
+            let accuses = t.names.iter().position(|n| *n != t.speaker);
+            Some(Verdict { lie: if wolf { 0.87 } else { 0.12 }, convincing: Some(3.4), claim: wolf.then_some(Role::Villager), accuses })
+        }
+    }
+
     fn recorded(lang: Lang) -> Vec<Event> {
         let players = deal(4, lang, &lineup("mixed").unwrap());
         let agents: Vec<Box<dyn Agent>> = (0..SEATS).map(|i| Box::new(ScriptedAgent::new(4, i)) as Box<dyn Agent>).collect();
         let mut events = Vec::new();
-        Engine::new(4, lang, players, agents).run(&mut |e: &Event| events.push(e.clone()));
+        let judge: std::sync::Arc<dyn crate::game::Judge> = std::sync::Arc::new(RoleJudge);
+        Engine::new(4, lang, players, agents).judged_by(Some(judge)).run(&mut |e: &Event| events.push(e.clone()));
         events
     }
 
     #[test]
     fn a_whole_game_plays_through_the_screen_without_panicking() {
         for lang in [Lang::Fr, Lang::En] {
-            let opts = Options { lang, crt: true, speed: 1.0, lineup: lineup("mixed").unwrap(), replay: true };
+            let opts = Options { lang, crt: true, speed: 1.0, lineup: lineup("mixed").unwrap(), replay: true, jev: false };
             let mut app = App::new(Source::Replay(recorded(lang)), opts);
             let mut terminal = Terminal::new(TestBackend::new(140, 44)).unwrap();
             terminal.draw(|f| app.draw(f)).unwrap();
@@ -933,14 +996,14 @@ mod tests {
         let Ok(dir) = std::env::var("CCWOLF_SNAPSHOTS") else { return };
         let dir = std::path::PathBuf::from(dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let opts = Options { lang: Lang::Fr, crt: true, speed: 1.0, lineup: lineup("mixed").unwrap(), replay: false };
+        let opts = Options { lang: Lang::Fr, crt: true, speed: 1.0, lineup: lineup("mixed").unwrap(), replay: false, jev: true };
         let mut app = App::new(Source::Replay(recorded(Lang::Fr)), opts);
         let mut terminal = Terminal::new(TestBackend::new(170, 52)).unwrap();
         app.anim = 3.0;
         terminal.draw(|f| app.draw(f)).unwrap();
         snapshot(terminal.backend().buffer(), &dir.join("00-title.ppm"));
         app.start();
-        let marks = [2.0, 5.0, 9.0, 14.0, 19.0, 26.0, 40.0, 60.0, 90.0, 140.0];
+        let marks = [2.0, 5.0, 9.0, 14.0, 19.0, 26.0, 40.0, 44.0, 47.0, 60.0, 90.0, 140.0];
         let mut next = 0;
         let mut t = 0.0;
         while next < marks.len() && t < 400.0 {

@@ -1,5 +1,6 @@
 mod claude;
 mod game;
+mod jev;
 mod lang;
 mod model;
 mod prompts;
@@ -10,10 +11,11 @@ mod ui;
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use claude::{Claude, LlmAgent};
-use game::{Agent, Engine, Event, PlayerInfo, ScriptedAgent, deal};
+use game::{Agent, Engine, Event, Judge, PlayerInfo, ScriptedAgent, deal};
 use lang::Lang;
 use model::Model;
 use record::Recorder;
@@ -24,10 +26,12 @@ const DEMO_EN: &str = include_str!("../replays/demo-en.jsonl");
 const HELP: &str = "ccwolf: werewolf in the terminal, played by Claude models
 
 USAGE
-  ccwolf                     watch 8 Claude models play (needs ANTHROPIC_API_KEY)
+  ccwolf                     watch 8 Claude models play (needs ANTHROPIC_API_KEY;
+                             with TYPESAFE_API_KEY, Jev scores every speech as a lie detector)
   ccwolf --demo              watch a recorded game, no API key needed
   ccwolf --replay FILE       watch one of your recorded games again
   ccwolf stats [DIR]         who lies best: results by model over your recorded games
+  ccwolf jev-check           try the Jev lie detector on three sample speeches
 
 OPTIONS
   --lang fr|en               language of the game and of the players (default: your locale)
@@ -40,6 +44,7 @@ OPTIONS
   --games N                  with --headless, play N games in a row
   --out DIR                  where games are recorded (default ~/.ccwolf/games, none with --scripted)
   --scripted                 players answer at random without the API, to test the screen
+  --no-jev                   do not call the Jev lie detector even if TYPESAFE_API_KEY is set
   -h, --help                 this help
   -V, --version              the version
 
@@ -59,6 +64,8 @@ struct Args {
     scripted: bool,
     out: Option<PathBuf>,
     stats: Option<PathBuf>,
+    jev: bool,
+    jev_check: bool,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -75,6 +82,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         scripted: false,
         out: None,
         stats: None,
+        jev: true,
+        jev_check: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -99,6 +108,8 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--demo" => args.demo = true,
             "--headless" => args.headless = true,
             "--scripted" => args.scripted = true,
+            "--no-jev" => args.jev = false,
+            "jev-check" => args.jev_check = true,
             "stats" => args.stats = Some(it.next().map(PathBuf::from).unwrap_or_else(record::default_dir)),
             other => return Err(format!("unknown argument {other}, see ccwolf --help")),
         }
@@ -112,6 +123,27 @@ fn agents(args: &Args, seed: u64, players: &[PlayerInfo]) -> Result<Vec<Box<dyn 
     }
     let claude = Claude::from_env().ok_or("ANTHROPIC_API_KEY is not set. Set it to play, or run ccwolf --demo to watch a recorded game.")?;
     Ok((0..players.len()).map(|i| Box::new(LlmAgent::new(claude.clone(), i, args.lang, players)) as Box<dyn Agent>).collect())
+}
+
+fn judge(args: &Args) -> Option<Arc<dyn Judge>> {
+    if !args.jev {
+        return None;
+    }
+    jev::Jev::from_env().map(|j| Arc::new(j) as Arc<dyn Judge>)
+}
+
+fn jev_check() -> Result<(), String> {
+    let jev = jev::Jev::from_env().ok_or("TYPESAFE_API_KEY is not set")?;
+    for (t, expected) in jev::samples() {
+        let started = std::time::Instant::now();
+        let v = jev.ask(&t)?;
+        let accused = v.accuses.map(|i| t.names[i].clone()).unwrap_or_else(|| "nobody".into());
+        let claim = v.claim.map(|r| format!("{r:?}").to_lowercase()).unwrap_or_else(|| "none".into());
+        let convincing = v.convincing.map(|c| format!("{c:.1}/5")).unwrap_or_else(|| "-".into());
+        println!("{} ({expected})", t.speaker);
+        println!("  lie {:.0}%, convincing {convincing}, claims {claim}, accuses {accused}, {} ms", v.lie * 100.0, started.elapsed().as_millis());
+    }
+    Ok(())
 }
 
 fn recorder(args: &Args, seed: u64) -> Result<Option<Recorder>, String> {
@@ -132,7 +164,7 @@ fn headless(args: &Args) -> Result<(), String> {
         let mut recorder = recorder(args, seed)?;
         let mut cost = 0.0;
         let mut out = std::io::stdout().lock();
-        Engine::new(seed, args.lang, players.clone(), agents).run(&mut |e: &Event| {
+        Engine::new(seed, args.lang, players.clone(), agents).judged_by(judge(args)).run(&mut |e: &Event| {
             if let Some(r) = recorder.as_mut() {
                 r.write(e);
             }
@@ -159,7 +191,9 @@ fn screen_error(e: std::io::Error) -> String {
 }
 
 fn watch(args: Args) -> Result<(), String> {
-    let options = |lang: Lang, replay: bool| ui::Options { lang, crt: args.crt, speed: args.speed, lineup: args.lineup.clone(), replay };
+    let judge = judge(&args);
+    let jev = judge.is_some();
+    let options = |lang: Lang, replay: bool| ui::Options { lang, crt: args.crt, speed: args.speed, lineup: args.lineup.clone(), replay, jev };
     if args.demo || args.replay.is_some() {
         let events = match &args.replay {
             Some(path) => record::load(path)?,
@@ -181,7 +215,7 @@ fn watch(args: Args) -> Result<(), String> {
     let path = recorder.as_ref().map(|r| r.path().to_path_buf());
     let lang = args.lang;
     let launch: ui::Launch = Box::new(move |tx: Sender<Event>| {
-        Engine::new(seed, lang, players, agents).run(&mut |e: &Event| {
+        Engine::new(seed, lang, players, agents).judged_by(judge).run(&mut |e: &Event| {
             if let Some(r) = recorder.as_mut() {
                 r.write(e);
             }
@@ -198,6 +232,7 @@ fn watch(args: Args) -> Result<(), String> {
 fn main() {
     let result = match parse_args() {
         Ok(None) => Ok(()),
+        Ok(Some(args)) if args.jev_check => jev_check(),
         Ok(Some(args)) if args.stats.is_some() => stats::print(args.stats.as_deref().expect("stats dir"), args.lang),
         Ok(Some(args)) if args.headless => headless(&args),
         Ok(Some(args)) => watch(args),

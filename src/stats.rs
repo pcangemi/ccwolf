@@ -5,7 +5,7 @@ use crate::game::{Event, PlayerInfo, Role, Team};
 use crate::lang::Lang;
 use crate::model::Model;
 
-#[derive(Default, Debug, PartialEq)]
+#[derive(Default, Debug)]
 pub struct Line {
     pub seats: u32,
     pub wolf_seats: u32,
@@ -17,6 +17,9 @@ pub struct Line {
     pub votes_on_wolves: u32,
     pub survived: u32,
     pub cost: f64,
+    pub wolf_lies: Vec<f32>,
+    pub wolf_convincing: Vec<f32>,
+    pub village_lies: Vec<f32>,
 }
 
 pub fn tally(games: &[Vec<Event>]) -> HashMap<Model, Line> {
@@ -49,6 +52,15 @@ pub fn tally(games: &[Vec<Event>]) -> HashMap<Model, Line> {
                     }
                 }
                 Event::Usage { player, cost, .. } => lines.entry(players[*player].model).or_default().cost += cost,
+                Event::Speech { player, verdict: Some(v), .. } => {
+                    let line = lines.entry(players[*player].model).or_default();
+                    if players[*player].role == Role::Wolf {
+                        line.wolf_lies.push(v.lie);
+                        line.wolf_convincing.extend(v.convincing);
+                    } else {
+                        line.village_lies.push(v.lie);
+                    }
+                }
                 _ => {}
             }
         }
@@ -69,6 +81,10 @@ fn seat(line: &mut Line, p: &PlayerInfo, winner: Team, alive: bool) {
         line.village_seats += 1;
         line.village_wins += (winner == Team::Village) as u32;
     }
+}
+
+fn mean(values: &[f32]) -> Option<f32> {
+    (!values.is_empty()).then(|| values.iter().sum::<f32>() / values.len() as f32)
 }
 
 fn pct(a: u32, b: u32) -> String {
@@ -110,6 +126,22 @@ pub fn print(dir: &Path, lang: Lang) -> Result<(), String> {
             pct(l.survived, l.seats),
             lang.money(if l.seats == 0 { 0.0 } else { l.cost / l.seats as f64 }),
         );
+    }
+    if lines.values().any(|l| !l.wolf_lies.is_empty() || !l.village_lies.is_empty()) {
+        println!();
+        println!("{}", if fr { "Détecteur de mensonges Jev, moyenne par prise de parole" } else { "Jev lie detector, average per speech" });
+        let head = if fr {
+            ["Modèle", "Mensonge en loup", "Convaincant en loup", "Bluff en villageois"]
+        } else {
+            ["Model", "Lies as wolf", "Convincing as wolf", "Bluffs as villager"]
+        };
+        println!("{:<12}{:>18}{:>22}{:>22}", head[0], head[1], head[2], head[3]);
+        let pct = |v: Option<f32>| v.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "-".into());
+        for model in Model::ALL {
+            let Some(l) = lines.get(&model) else { continue };
+            let convincing = mean(&l.wolf_convincing).map(|c| format!("{c:.1}/5")).unwrap_or_else(|| "-".into());
+            println!("{:<12}{:>18}{:>22}{:>22}", model.label(), pct(mean(&l.wolf_lies)), convincing, pct(mean(&l.village_lies)));
+        }
     }
     Ok(())
 }
