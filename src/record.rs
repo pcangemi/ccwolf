@@ -32,6 +32,18 @@ impl Recorder {
     }
 }
 
+pub fn save(path: &Path, events: &[Event]) -> Result<(), String> {
+    let tmp = path.with_extension("jsonl.tmp");
+    let mut out = BufWriter::new(File::create(&tmp).map_err(|e| e.to_string())?);
+    for e in events.iter().filter(|e| e.is_recorded()) {
+        let line = serde_json::to_string(e).map_err(|e| e.to_string())?;
+        writeln!(out, "{line}").map_err(|e| e.to_string())?;
+    }
+    out.flush().map_err(|e| e.to_string())?;
+    drop(out);
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
 pub fn default_dir() -> PathBuf {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     home.join(".ccwolf").join("games")

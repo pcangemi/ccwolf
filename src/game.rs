@@ -202,6 +202,58 @@ pub struct Testimony {
     pub names: Vec<String>,
 }
 
+pub fn testimony(lang: Lang, players: &[PlayerInfo], log: &[Event], p: usize, speech: &str) -> Testimony {
+    let mut knows: Vec<String> = Vec::new();
+    if players[p].role == Role::Wolf {
+        for q in (0..players.len()).filter(|&q| q != p && players[q].role == Role::Wolf) {
+            knows.push(match lang {
+                Lang::Fr => format!("{} est aussi loup-garou.", players[q].name),
+                Lang::En => format!("{} is also a werewolf.", players[q].name),
+            });
+        }
+    }
+    let private = log
+        .iter()
+        .filter(|e| matches!(e.audience(), Audience::Wolves | Audience::Only(_)) && e.visible_to(p, players))
+        .filter_map(|e| crate::prompts::describe(lang, e, p, players));
+    knows.extend(private);
+    let start = knows.len().saturating_sub(12);
+    let mut recent: Vec<String> =
+        log.iter().rev().filter(|e| e.audience() == Audience::All).filter_map(|e| crate::prompts::describe(lang, e, p, players)).take(8).collect();
+    recent.reverse();
+    Testimony {
+        speaker: players[p].name.clone(),
+        role: players[p].role,
+        knows: knows[start..].to_vec(),
+        recent,
+        speech: speech.to_string(),
+        names: players.iter().map(|x| x.name.clone()).collect(),
+    }
+}
+
+pub fn judge_recording(events: &mut [Event], judge: &dyn Judge, force: bool) -> (usize, usize) {
+    let Some(Event::Setup { lang, players, .. }) = events.first().cloned() else { return (0, 0) };
+    let (mut judged, mut failed) = (0, 0);
+    for i in 0..events.len() {
+        let (before, rest) = events.split_at_mut(i);
+        let (player, say, verdict) = match &mut rest[0] {
+            Event::Speech { player, say, verdict, .. } | Event::LastWords { player, say, verdict, .. } => (*player, say.clone(), verdict),
+            _ => continue,
+        };
+        if verdict.is_some() && !force {
+            continue;
+        }
+        match judge.judge(&testimony(lang, &players, before, player, &say)) {
+            Some(v) => {
+                *verdict = Some(v);
+                judged += 1;
+            }
+            None => failed += 1,
+        }
+    }
+    (judged, failed)
+}
+
 pub trait Judge: Send + Sync {
     fn judge(&self, testimony: &Testimony) -> Option<Verdict>;
 }
@@ -265,40 +317,7 @@ impl Engine {
     }
 
     pub fn testimony(&self, p: usize, speech: &str) -> Testimony {
-        let players = &self.players;
-        let mut knows: Vec<String> = Vec::new();
-        if players[p].role == Role::Wolf {
-            for q in (0..players.len()).filter(|&q| q != p && players[q].role == Role::Wolf) {
-                knows.push(match self.lang {
-                    Lang::Fr => format!("{} est aussi loup-garou.", players[q].name),
-                    Lang::En => format!("{} is also a werewolf.", players[q].name),
-                });
-            }
-        }
-        let private = self
-            .log
-            .iter()
-            .filter(|e| matches!(e.audience(), Audience::Wolves | Audience::Only(_)) && e.visible_to(p, players))
-            .filter_map(|e| crate::prompts::describe(self.lang, e, p, players));
-        knows.extend(private);
-        let start = knows.len().saturating_sub(12);
-        let mut recent: Vec<String> = self
-            .log
-            .iter()
-            .rev()
-            .filter(|e| e.audience() == Audience::All)
-            .filter_map(|e| crate::prompts::describe(self.lang, e, p, players))
-            .take(8)
-            .collect();
-        recent.reverse();
-        Testimony {
-            speaker: players[p].name.clone(),
-            role: players[p].role,
-            knows: knows[start..].to_vec(),
-            recent,
-            speech: speech.to_string(),
-            names: players.iter().map(|x| x.name.clone()).collect(),
-        }
+        testimony(self.lang, &self.players, &self.log, p, speech)
     }
 
     fn verdict(&self, p: usize, speech: &str) -> Option<Verdict> {
@@ -747,5 +766,23 @@ mod tests {
         let judged = events.iter().filter(|e| matches!(e, Event::Speech { verdict: Some(_), .. })).count();
         let speeches = events.iter().filter(|e| matches!(e, Event::Speech { .. })).count();
         assert_eq!(judged, speeches);
+    }
+
+    #[test]
+    fn judging_a_recording_afterwards_matches_judging_it_live() {
+        let seed = 12;
+        let players = deal(seed, Lang::En, &lineup("mixed").unwrap());
+        let live_agents: Vec<Box<dyn Agent>> = (0..SEATS).map(|i| Box::new(ScriptedAgent::new(seed, i)) as Box<dyn Agent>).collect();
+        let live_judge = Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+        Engine::new(seed, Lang::En, players.clone(), live_agents).judged_by(Some(live_judge.clone())).run(&mut |_: &Event| {});
+        let agents: Vec<Box<dyn Agent>> = (0..SEATS).map(|i| Box::new(ScriptedAgent::new(seed, i)) as Box<dyn Agent>).collect();
+        let mut events = Vec::new();
+        Engine::new(seed, Lang::En, players, agents).run(&mut |e: &Event| events.push(e.clone()));
+        let late_judge = Recorder(std::sync::Mutex::new(Vec::new()));
+        let (judged, failed) = judge_recording(&mut events, &late_judge, false);
+        assert_eq!(failed, 0);
+        assert_eq!(*live_judge.0.lock().unwrap(), *late_judge.0.lock().unwrap());
+        assert_eq!(judged, late_judge.0.lock().unwrap().len());
+        assert_eq!(judge_recording(&mut events, &late_judge, false), (0, 0));
     }
 }

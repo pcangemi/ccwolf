@@ -32,6 +32,7 @@ USAGE
   ccwolf --replay FILE       watch one of your recorded games again
   ccwolf stats [DIR]         who lies best: results by model over your recorded games
   ccwolf jev-check           try the Jev lie detector on three sample speeches
+  ccwolf judge FILE...       add Jev verdicts to recorded games (--force to judge again)
 
 OPTIONS
   --lang fr|en               language of the game and of the players (default: your locale)
@@ -69,6 +70,8 @@ struct Args {
     jev: bool,
     jev_check: bool,
     effort: Option<String>,
+    judge: Vec<PathBuf>,
+    force: bool,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -88,6 +91,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         jev: true,
         jev_check: false,
         effort: None,
+        judge: Vec::new(),
+        force: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -121,6 +126,14 @@ fn parse_args() -> Result<Option<Args>, String> {
                 args.effort = Some(effort);
             }
             "jev-check" => args.jev_check = true,
+            "judge" => {
+                args.judge = it.by_ref().map(PathBuf::from).collect();
+                args.force = args.judge.iter().any(|p| p.as_os_str() == "--force");
+                args.judge.retain(|p| p.as_os_str() != "--force");
+                if args.judge.is_empty() {
+                    return Err("judge needs at least one recorded game".into());
+                }
+            }
             "stats" => args.stats = Some(it.next().map(PathBuf::from).unwrap_or_else(record::default_dir)),
             other => return Err(format!("unknown argument {other}, see ccwolf --help")),
         }
@@ -153,6 +166,19 @@ fn jev_check() -> Result<(), String> {
         let convincing = v.convincing.map(|c| format!("{c:.1}/5")).unwrap_or_else(|| "-".into());
         println!("{} ({expected})", t.speaker);
         println!("  lie {:.0}%, convincing {convincing}, claims {claim}, accuses {accused}, {} ms", v.lie * 100.0, started.elapsed().as_millis());
+    }
+    Ok(())
+}
+
+fn judge_files(args: &Args) -> Result<(), String> {
+    let jev = jev::Jev::from_env().ok_or("TYPESAFE_API_KEY is not set")?;
+    for path in &args.judge {
+        let mut events = record::load(path)?;
+        let (judged, failed) = game::judge_recording(&mut events, &jev, args.force);
+        if judged > 0 {
+            record::save(path, &events)?;
+        }
+        println!("{}: {judged} speeches judged, {failed} failed", path.display());
     }
     Ok(())
 }
@@ -245,6 +271,7 @@ fn main() {
     let result = match parse_args() {
         Ok(None) => Ok(()),
         Ok(Some(args)) if args.jev_check => jev_check(),
+        Ok(Some(args)) if !args.judge.is_empty() => judge_files(&args),
         Ok(Some(args)) if args.stats.is_some() => stats::print(args.stats.as_deref().expect("stats dir"), args.lang),
         Ok(Some(args)) if args.headless => headless(&args),
         Ok(Some(args)) => watch(args),
