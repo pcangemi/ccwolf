@@ -11,7 +11,7 @@ Set TypingSpeed 0
 Set Theme { "background": "#0b0b14", "foreground": "#e2e2ec" }
 
 Hide
-Type "ccwolf --demo --lang fr --speed 1.4" Enter
+Type "export PATH=$HOME/.cargo/bin:$PATH; clear; ccwolf --demo --lang fr --speed 1.4" Enter
 Sleep 1s
 Show
 Sleep 3s

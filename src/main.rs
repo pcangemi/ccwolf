@@ -72,6 +72,7 @@ struct Args {
     effort: Option<String>,
     judge: Vec<PathBuf>,
     force: bool,
+    video: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -93,6 +94,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         effort: None,
         judge: Vec::new(),
         force: false,
+        video: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -114,6 +116,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--out" => args.out = Some(PathBuf::from(value("--out")?)),
             "--replay" => args.replay = Some(PathBuf::from(value("--replay")?)),
             "--no-crt" => args.crt = false,
+            "--video" => args.video = Some(PathBuf::from(value("--video")?)),
             "--demo" => args.demo = true,
             "--headless" => args.headless = true,
             "--scripted" => args.scripted = true,
@@ -224,6 +227,27 @@ fn headless(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "video")]
+fn video(events: Vec<Event>, options: ui::Options, out: &std::path::Path) -> Result<(), String> {
+    let video = ui::video::VideoOptions {
+        out: out.to_path_buf(),
+        cols: 192,
+        rows: 54,
+        fps: 30,
+        font: PathBuf::from("/System/Library/Fonts/Menlo.ttc"),
+        cell_w: 10,
+        cell_h: 20,
+        title_seconds: 3.0,
+        tail_seconds: 6.0,
+    };
+    ui::video::render(events, options, video)
+}
+
+#[cfg(not(feature = "video"))]
+fn video(_: Vec<Event>, _: ui::Options, _: &std::path::Path) -> Result<(), String> {
+    Err("this build has no video support: cargo build --release --features video".into())
+}
+
 fn screen_error(e: std::io::Error) -> String {
     format!("cannot open the terminal screen ({e}), run ccwolf in an interactive terminal or use --headless")
 }
@@ -244,6 +268,9 @@ fn watch(args: Args) -> Result<(), String> {
             Some(Event::Setup { lang, .. }) => *lang,
             _ => args.lang,
         };
+        if let Some(out) = &args.video {
+            return video(events, options(lang, true), out);
+        }
         return ui::run(ui::Source::Replay(events), options(lang, true)).map_err(screen_error);
     }
     let seed = args.seed.unwrap_or_else(rng::seed_from_clock);

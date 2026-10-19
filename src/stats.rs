@@ -139,7 +139,7 @@ pub fn print(dir: &Path, lang: Lang) -> Result<(), String> {
         let pct = |v: Option<f32>| v.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "-".into());
         for model in Model::ALL {
             let Some(l) = lines.get(&model) else { continue };
-            let convincing = mean(&l.wolf_convincing).map(|c| format!("{c:.1}/5")).unwrap_or_else(|| "-".into());
+            let convincing = mean(&l.wolf_convincing).map(|c| format!("{}/5", lang.decimal(c))).unwrap_or_else(|| "-".into());
             println!("{:<12}{:>18}{:>22}{:>22}", model.label(), pct(mean(&l.wolf_lies)), convincing, pct(mean(&l.village_lies)));
         }
     }

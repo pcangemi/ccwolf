@@ -285,7 +285,7 @@ fn jev_line(lang: Lang, v: &crate::game::Verdict, players: &[PlayerInfo]) -> Str
     let ui = lang.ui();
     let mut parts = vec![format!("{} {:.0}{}", ui.lie, v.lie * 100.0, if lang == Lang::Fr { "\u{a0}%" } else { "%" })];
     if let Some(c) = v.convincing {
-        parts.push(format!("{c:.1}/5"));
+        parts.push(format!("{}/5", lang.decimal(c)));
     }
     if let Some(role) = v.claim {
         parts.push(format!("{} {}", ui.claims, ui.role(role)));

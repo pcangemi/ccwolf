@@ -1,5 +1,7 @@
 pub mod canvas;
 pub mod scene;
+#[cfg(feature = "video")]
+pub mod video;
 
 use std::collections::VecDeque;
 use std::io;

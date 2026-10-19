@@ -29,6 +29,11 @@ impl Lang {
         Lang::En
     }
 
+    pub fn decimal(self, value: f32) -> String {
+        let text = format!("{value:.1}");
+        if self == Lang::Fr { text.replace('.', ",") } else { text }
+    }
+
     pub fn ui(self) -> &'static Ui {
         match self {
             Lang::Fr => &FR,
