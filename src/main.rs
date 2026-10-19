@@ -44,6 +44,8 @@ OPTIONS
   --games N                  with --headless, play N games in a row
   --out DIR                  where games are recorded (default ~/.ccwolf/games, none with --scripted)
   --scripted                 players answer at random without the API, to test the screen
+  --effort low|medium|high   how hard the models think before answering (default: each
+                             model's own default; low is cheaper and faster)
   --no-jev                   do not call the Jev lie detector even if TYPESAFE_API_KEY is set
   -h, --help                 this help
   -V, --version              the version
@@ -66,6 +68,7 @@ struct Args {
     stats: Option<PathBuf>,
     jev: bool,
     jev_check: bool,
+    effort: Option<String>,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -84,6 +87,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         stats: None,
         jev: true,
         jev_check: false,
+        effort: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -109,6 +113,13 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--headless" => args.headless = true,
             "--scripted" => args.scripted = true,
             "--no-jev" => args.jev = false,
+            "--effort" => {
+                let effort = value("--effort")?;
+                if !["low", "medium", "high"].contains(&effort.as_str()) {
+                    return Err("--effort takes low, medium or high".into());
+                }
+                args.effort = Some(effort);
+            }
             "jev-check" => args.jev_check = true,
             "stats" => args.stats = Some(it.next().map(PathBuf::from).unwrap_or_else(record::default_dir)),
             other => return Err(format!("unknown argument {other}, see ccwolf --help")),
@@ -122,7 +133,7 @@ fn agents(args: &Args, seed: u64, players: &[PlayerInfo]) -> Result<Vec<Box<dyn 
         return Ok((0..players.len()).map(|i| Box::new(ScriptedAgent::new(seed, i)) as Box<dyn Agent>).collect());
     }
     let claude = Claude::from_env().ok_or("ANTHROPIC_API_KEY is not set. Set it to play, or run ccwolf --demo to watch a recorded game.")?;
-    Ok((0..players.len()).map(|i| Box::new(LlmAgent::new(claude.clone(), i, args.lang, players)) as Box<dyn Agent>).collect())
+    Ok((0..players.len()).map(|i| Box::new(LlmAgent::new(claude.clone(), i, args.lang, players, args.effort.clone())) as Box<dyn Agent>).collect())
 }
 
 fn judge(args: &Args) -> Option<Arc<dyn Judge>> {
@@ -178,7 +189,8 @@ fn headless(args: &Args) -> Result<(), String> {
             }
         });
         let saved = recorder.as_ref().map(|r| r.path().display().to_string()).unwrap_or_default();
-        let summary = format!("{}: {}\n{saved}\n", args.lang.ui().total_cost, args.lang.money(cost));
+        let colon = if args.lang == Lang::Fr { " :" } else { ":" };
+        let summary = format!("{}{colon} {}\n{saved}\n", args.lang.ui().total_cost, args.lang.money(cost));
         if writeln!(out, "{summary}").is_err() {
             return Ok(());
         }

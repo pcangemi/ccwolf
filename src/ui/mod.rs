@@ -12,7 +12,7 @@ use ratatui::crossterm::event::{self, Event as Input, KeyCode, KeyEventKind, Key
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
 use crate::game::{Event, PlayerInfo, Role, Team, Verdict};
 use crate::lang::{Lang, Ui};
@@ -338,7 +338,8 @@ impl App {
                     self.flash = Some((Rgb(180.0, 20.0, 30.0), self.clock + 1.2));
                     self.shake_until = self.clock + 1.6;
                     let role = ui.role(self.players[d].role);
-                    let line = if fr { format!("{} est mort cette nuit ({role})", self.name(d)) } else { format!("{} died last night ({role})", self.name(d)) };
+                    let line =
+                        if fr { format!("Victime de la nuit : {} ({role})", self.name(d)) } else { format!("Victim of the night: {} ({role})", self.name(d)) };
                     self.log(line, Rgb(255.0, 120.0, 110.0));
                 }
                 3.8
@@ -718,15 +719,28 @@ impl App {
         } else {
             said
         };
-        lines.push(Line::from(vec![Span::styled(said, fg(TEXT)), Span::styled(cursor, fg(accent))]));
-        f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: true }), speech_area);
+        let inner = block.inner(speech_area);
+        let room = (inner.height as usize).saturating_sub(lines.len()).max(1);
+        let mut wrapped = wrap(&format!("{said}{cursor}"), inner.width as usize);
+        let skip = wrapped.len().saturating_sub(room);
+        for line in wrapped.drain(skip..) {
+            let (text, tail) = match line.strip_suffix(cursor).filter(|_| !cursor.is_empty()) {
+                Some(text) => (text.to_string(), cursor),
+                None => (line, ""),
+            };
+            lines.push(Line::from(vec![Span::styled(text, fg(TEXT)), Span::styled(tail, fg(accent))]));
+        }
+        f.render_widget(Paragraph::new(lines).block(block), speech_area);
 
-        let body = if self.show_thoughts {
-            Line::from(Span::styled(cut(&p.thought), fg(THOUGHT).add_modifier(Modifier::ITALIC)))
+        let inner = thought_block.inner(thought_area);
+        let body: Vec<Line> = if self.show_thoughts {
+            let wrapped = wrap(&cut(&p.thought), inner.width as usize);
+            let skip = wrapped.len().saturating_sub(inner.height as usize);
+            wrapped.into_iter().skip(skip).map(|l| Line::from(Span::styled(l, fg(THOUGHT).add_modifier(Modifier::ITALIC)))).collect()
         } else {
-            Line::from(Span::styled("[t]", fg(DIM)))
+            vec![Line::from(Span::styled("[t]", fg(DIM)))]
         };
-        f.render_widget(Paragraph::new(body).block(thought_block).wrap(Wrap { trim: true }), thought_area);
+        f.render_widget(Paragraph::new(body).block(thought_block), thought_area);
     }
 
     fn draw_feed(&self, f: &mut Frame, area: Rect) {
@@ -822,6 +836,35 @@ impl App {
         ]));
         f.render_widget(Paragraph::new(lines).block(block), area);
     }
+}
+
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word.to_string();
+        while word.chars().count() > width {
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            let head: String = word.chars().take(width).collect();
+            word = word.chars().skip(width).collect();
+            lines.push(head);
+        }
+        let needed = line.chars().count() + usize::from(!line.is_empty()) + word.chars().count();
+        if needed > width && !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(&word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 fn crt(buf: &mut Buffer, area: Rect) {
@@ -997,7 +1040,11 @@ mod tests {
         let dir = std::path::PathBuf::from(dir);
         std::fs::create_dir_all(&dir).unwrap();
         let opts = Options { lang: Lang::Fr, crt: true, speed: 1.0, lineup: lineup("mixed").unwrap(), replay: false, jev: true };
-        let mut app = App::new(Source::Replay(recorded(Lang::Fr)), opts);
+        let events = match std::env::var("CCWOLF_SNAPSHOT_REPLAY") {
+            Ok(path) => crate::record::load(std::path::Path::new(&path)).unwrap(),
+            Err(_) => recorded(Lang::Fr),
+        };
+        let mut app = App::new(Source::Replay(events), opts);
         let mut terminal = Terminal::new(TestBackend::new(170, 52)).unwrap();
         app.anim = 3.0;
         terminal.draw(|f| app.draw(f)).unwrap();
@@ -1014,6 +1061,16 @@ mod tests {
                 snapshot(terminal.backend().buffer(), &dir.join(format!("{:02}-t{}.ppm", next + 1, marks[next] as u32)));
                 next += 1;
             }
+        }
+    }
+
+    #[test]
+    fn wrapping_keeps_every_word_within_the_width() {
+        let text = "Pauvre Marie, c'est affreux. Je suis Léon, l'ancien maire, et je vous prie de croire que je n'ai rien à cacher. Anticonstitutionnellement!";
+        for width in [8, 12, 30, 60] {
+            let lines = wrap(text, width);
+            assert!(lines.iter().all(|l| l.chars().count() <= width), "{width}: {lines:?}");
+            assert_eq!(lines.join(" ").split_whitespace().collect::<String>(), text.split_whitespace().collect::<String>());
         }
     }
 }

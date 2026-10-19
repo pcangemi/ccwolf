@@ -58,38 +58,33 @@ pub fn system(lang: Lang, me: usize, players: &[PlayerInfo]) -> String {
         .replace("{role_card}", &role_card(lang, me, players))
 }
 
-pub const TOOL: &str = "act";
-
-pub fn tools(lang: Lang, players: &[PlayerInfo]) -> Value {
+pub fn schema(lang: Lang, players: &[PlayerInfo]) -> Value {
     let names: Vec<&str> = players.iter().map(|p| p.name.as_str()).collect();
     let mut with_nobody = names.clone();
     with_nobody.push(nobody(lang));
     let fr = lang == Lang::Fr;
-    json!([{
-        "name": TOOL,
-        "description": if fr { "Agir dans la partie : penser, puis parler, choisir un joueur ou utiliser tes potions, selon ce qu'on te demande." } else { "Act in the game: think, then speak, choose a player or use your potions, as asked." },
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "thought": { "type": "string", "description": if fr { "Ta pensée secrète, que personne d'autre ne lit (30 mots maximum)." } else { "Your secret thought, which nobody else reads (30 words at most)." } },
-                "speech": { "type": "string", "description": if fr { "Quand on te demande de parler : ce que tu dis à voix haute (60 mots maximum)." } else { "When asked to speak: what you say out loud (60 words at most)." } },
-                "target": { "type": "string", "enum": names, "description": if fr { "Quand on te demande de choisir ou de voter : le joueur choisi." } else { "When asked to choose or vote: the chosen player." } },
-                "save": { "type": "boolean", "description": if fr { "Sorcière : vrai pour sauver la victime des loups avec la potion de vie." } else { "Witch: true to save the werewolves' victim with the healing potion." } },
-                "poison": { "type": "string", "enum": with_nobody, "description": if fr { "Sorcière : le joueur à empoisonner, ou personne." } else { "Witch: the player to poison, or nobody." } }
-            },
-            "required": ["thought"]
-        }
-    }])
+    json!({
+        "type": "object",
+        "properties": {
+            "aside": { "type": "string", "description": if fr { "L'aparté de ton personnage : son monologue intérieur, que personne d'autre n'entend (30 mots maximum)." } else { "Your character's aside: their inner monologue, which nobody else hears (30 words at most)." } },
+            "speech": { "type": "string", "description": if fr { "Quand on te demande de parler : ce que ton personnage dit à voix haute (60 mots maximum)." } else { "When asked to speak: what your character says out loud (60 words at most)." } },
+            "target": { "type": "string", "enum": names, "description": if fr { "Quand on te demande de choisir ou de voter : le joueur choisi." } else { "When asked to choose or vote: the chosen player." } },
+            "save": { "type": "boolean", "description": if fr { "Sorcière : vrai pour sauver la victime des loups avec la potion de vie." } else { "Witch: true to save the werewolves' victim with the healing potion." } },
+            "poison": { "type": "string", "enum": with_nobody, "description": if fr { "Sorcière : le joueur à empoisonner, ou personne." } else { "Witch: the player to poison, or nobody." } }
+        },
+        "required": ["aside"],
+        "additionalProperties": false
+    })
 }
 
 fn fields(lang: Lang, task: &Task) -> &'static str {
     match (lang, task) {
-        (Lang::Fr, Task::WolfTalk { .. } | Task::Speak { .. } | Task::LastWords) => "Remplis thought, puis speech.",
-        (Lang::Fr, Task::WolfPick { .. } | Task::Seer { .. } | Task::Vote { .. }) => "Remplis thought, puis target.",
-        (Lang::Fr, Task::Witch { .. }) => "Remplis thought, puis save et poison.",
-        (Lang::En, Task::WolfTalk { .. } | Task::Speak { .. } | Task::LastWords) => "Fill in thought, then speech.",
-        (Lang::En, Task::WolfPick { .. } | Task::Seer { .. } | Task::Vote { .. }) => "Fill in thought, then target.",
-        (Lang::En, Task::Witch { .. }) => "Fill in thought, then save and poison.",
+        (Lang::Fr, Task::WolfTalk { .. } | Task::Speak { .. } | Task::LastWords) => "Remplis aside, puis speech.",
+        (Lang::Fr, Task::WolfPick { .. } | Task::Seer { .. } | Task::Vote { .. }) => "Remplis aside, puis target.",
+        (Lang::Fr, Task::Witch { .. }) => "Remplis aside, puis save et poison.",
+        (Lang::En, Task::WolfTalk { .. } | Task::Speak { .. } | Task::LastWords) => "Fill in aside, then speech.",
+        (Lang::En, Task::WolfPick { .. } | Task::Seer { .. } | Task::Vote { .. }) => "Fill in aside, then target.",
+        (Lang::En, Task::Witch { .. }) => "Fill in aside, then save and poison.",
     }
 }
 
@@ -247,9 +242,9 @@ pub fn describe(lang: Lang, e: &Event, viewer: usize, players: &[PlayerInfo]) ->
                 let dead: Vec<String> = deaths.iter().map(|&d| with_role(lang, d, players)).collect();
                 let dead = dead.join(if fr { " et " } else { " and " });
                 if fr {
-                    format!("Le jour {day} se lève. Cette nuit, on a retrouvé mort : {dead}.")
+                    format!("Le jour {day} se lève. {} de la nuit : {dead}.", if deaths.len() > 1 { "Victimes" } else { "Victime" })
                 } else {
-                    format!("Day {day} dawns. Found dead this morning: {dead}.")
+                    format!("Day {day} dawns. {} of the night: {dead}.", if deaths.len() > 1 { "Victims" } else { "Victim" })
                 }
             }
         }
@@ -370,7 +365,7 @@ mod tests {
                 assert!(!s.contains('{'), "{s}");
                 assert!(s.contains(&players[me].name));
             }
-            assert!(!tools(lang, &players).to_string().contains('\u{2014}'));
+            assert!(!schema(lang, &players).to_string().contains('\u{2014}'));
         }
     }
 
@@ -395,11 +390,13 @@ mod tests {
     }
 
     #[test]
-    fn one_tool_lists_every_player_and_nobody_for_the_poison() {
+    fn the_schema_lists_every_player_and_nobody_for_the_poison() {
         let players = table(Lang::Fr);
-        let tools = tools(Lang::Fr, &players);
-        assert_eq!(tools.as_array().unwrap().len(), 1);
-        let props = &tools[0]["input_schema"]["properties"];
+        let schema = schema(Lang::Fr, &players);
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], json!(["aside"]));
+        let props = &schema["properties"];
+        assert!(props.get("thought").is_none(), "a field named thought makes Opus and Fable refuse");
         assert_eq!(props["target"]["enum"].as_array().unwrap().len(), 8);
         let poison = props["poison"]["enum"].as_array().unwrap();
         assert_eq!(poison.len(), 9);
@@ -421,7 +418,7 @@ mod tests {
         ];
         for task in &tasks {
             let text = task_text(Lang::En, task, &players);
-            assert!(text.contains("Fill in thought"), "{text}");
+            assert!(text.contains("Fill in aside"), "{text}");
             assert!(!task_text(Lang::Fr, task, &players).contains('\u{2014}'));
         }
     }
