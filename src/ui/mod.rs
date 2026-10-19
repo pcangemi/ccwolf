@@ -1,0 +1,956 @@
+pub mod canvas;
+pub mod scene;
+
+use std::collections::VecDeque;
+use std::io;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
+
+use ratatui::Frame;
+use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{self, Event as Input, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
+
+use crate::game::{Event, PlayerInfo, Role, Team};
+use crate::lang::{Lang, Ui};
+use crate::model::Model;
+use canvas::{Rgb, label};
+use scene::{Scene, Seat};
+
+const CPS: f32 = 38.0;
+const BG: Rgb = Rgb(11.0, 11.0, 20.0);
+const PANEL: Rgb = Rgb(17.0, 16.0, 30.0);
+const TEXT: Rgb = Rgb(226.0, 226.0, 236.0);
+const DIM: Rgb = Rgb(128.0, 128.0, 150.0);
+const WOLF_RED: Rgb = Rgb(232.0, 72.0, 72.0);
+const SEER_VIOLET: Rgb = Rgb(186.0, 128.0, 255.0);
+const WITCH_GREEN: Rgb = Rgb(110.0, 220.0, 130.0);
+const THOUGHT: Rgb = Rgb(206.0, 180.0, 255.0);
+const GOLD: Rgb = Rgb(255.0, 210.0, 90.0);
+
+pub type Launch = Box<dyn FnOnce(Sender<Event>) + Send>;
+
+pub enum Source {
+    Live(Launch),
+    Replay(Vec<Event>),
+}
+
+pub struct Options {
+    pub lang: Lang,
+    pub crt: bool,
+    pub speed: f32,
+    pub lineup: Vec<Model>,
+    pub replay: bool,
+}
+
+fn role_color(role: Role) -> Rgb {
+    match role {
+        Role::Wolf => WOLF_RED,
+        Role::Seer => SEER_VIOLET,
+        Role::Witch => WITCH_GREEN,
+        Role::Villager => Rgb(214.0, 196.0, 160.0),
+    }
+}
+
+fn fg(c: Rgb) -> Style {
+    Style::new().fg(c.color())
+}
+
+struct Show {
+    start: f32,
+    dur: f32,
+}
+
+struct Panel {
+    title: String,
+    who: Option<usize>,
+    say: String,
+    thought: String,
+    accent: Rgb,
+    start: f32,
+}
+
+struct Banner {
+    text: String,
+    start: f32,
+    dur: f32,
+}
+
+#[derive(PartialEq)]
+enum Stage {
+    Title,
+    Game,
+}
+
+struct App {
+    lang: Lang,
+    ui: &'static Ui,
+    stage: Stage,
+    source: Option<Source>,
+    rx: Option<Receiver<Event>>,
+    queue: VecDeque<Event>,
+    players: Vec<PlayerInfo>,
+    alive: Vec<bool>,
+    dissolve_start: Vec<Option<f32>>,
+    night: f32,
+    night_target: f32,
+    day: u32,
+    clock: f32,
+    anim: f32,
+    show: Option<Show>,
+    panel: Option<Panel>,
+    speaker: Option<usize>,
+    feed: Vec<(String, Rgb)>,
+    tally: Vec<u32>,
+    voting: bool,
+    thinking: Option<usize>,
+    mark: Option<(usize, Rgb)>,
+    banner: Option<Banner>,
+    flash: Option<(Rgb, f32)>,
+    shake_until: f32,
+    cost: f64,
+    winner: Option<Team>,
+    aborted: Option<String>,
+    show_thoughts: bool,
+    show_roles: bool,
+    crt: bool,
+    paused: bool,
+    speed: f32,
+    replay: bool,
+    lineup: Vec<Model>,
+    quit: bool,
+}
+
+impl App {
+    fn new(source: Source, opts: Options) -> App {
+        App {
+            lang: opts.lang,
+            ui: opts.lang.ui(),
+            stage: Stage::Title,
+            source: Some(source),
+            rx: None,
+            queue: VecDeque::new(),
+            players: Vec::new(),
+            alive: Vec::new(),
+            dissolve_start: Vec::new(),
+            night: 0.0,
+            night_target: 0.0,
+            day: 0,
+            clock: 0.0,
+            anim: 0.0,
+            show: None,
+            panel: None,
+            speaker: None,
+            feed: Vec::new(),
+            tally: Vec::new(),
+            voting: false,
+            thinking: None,
+            mark: None,
+            banner: None,
+            flash: None,
+            shake_until: 0.0,
+            cost: 0.0,
+            winner: None,
+            aborted: None,
+            show_thoughts: true,
+            show_roles: true,
+            crt: opts.crt,
+            paused: false,
+            speed: opts.speed,
+            replay: opts.replay,
+            lineup: opts.lineup,
+            quit: false,
+        }
+    }
+
+    fn start(&mut self) {
+        let (tx, rx) = mpsc::channel();
+        match self.source.take() {
+            Some(Source::Live(launch)) => {
+                std::thread::spawn(move || launch(tx));
+            }
+            Some(Source::Replay(events)) => {
+                std::thread::spawn(move || {
+                    for e in events {
+                        if tx.send(e).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            None => {}
+        }
+        self.rx = Some(rx);
+        self.stage = Stage::Game;
+        self.clock = 0.0;
+    }
+
+    fn pump(&mut self) {
+        if let Some(rx) = &self.rx {
+            while let Ok(e) = rx.try_recv() {
+                self.queue.push_back(e);
+            }
+        }
+    }
+
+    fn name(&self, p: usize) -> String {
+        self.players.get(p).map(|x| x.name.clone()).unwrap_or_default()
+    }
+
+    fn log(&mut self, text: String, color: Rgb) {
+        self.feed.push((text, color));
+        if self.feed.len() > 200 {
+            self.feed.remove(0);
+        }
+    }
+
+    fn typing_time(&self, say: &str, thought: &str) -> f32 {
+        let longest = if self.show_thoughts { say.chars().count().max(thought.chars().count()) } else { say.chars().count() };
+        longest as f32 / CPS + 2.2
+    }
+
+    fn open_panel(&mut self, title: &str, who: Option<usize>, say: String, thought: String, accent: Rgb) -> f32 {
+        let dur = self.typing_time(&say, &thought);
+        self.panel = Some(Panel { title: title.to_string(), who, say, thought, accent, start: self.clock });
+        dur
+    }
+
+    fn banner(&mut self, text: String, dur: f32) {
+        self.banner = Some(Banner { text, start: self.clock, dur });
+    }
+
+    fn kill(&mut self, p: usize) {
+        if let Some(alive) = self.alive.get_mut(p) {
+            *alive = false;
+            self.dissolve_start[p] = Some(self.clock);
+        }
+    }
+
+    fn begin(&mut self, e: Event) -> f32 {
+        let ui = self.ui;
+        let fr = self.lang == Lang::Fr;
+        match e {
+            Event::Setup { players, .. } => {
+                self.alive = vec![true; players.len()];
+                self.dissolve_start = vec![None; players.len()];
+                self.tally = vec![0; players.len()];
+                self.players = players;
+                1.0
+            }
+            Event::Night { day } => {
+                self.day = day;
+                self.night_target = 1.0;
+                self.voting = false;
+                self.mark = None;
+                self.panel = None;
+                self.speaker = None;
+                self.banner(format!("{} {day}", ui.night), 3.0);
+                self.log(format!("{} {day}", ui.night), Rgb(140.0, 150.0, 230.0));
+                3.4
+            }
+            Event::WolfTalk { player, thought, say } => {
+                self.thinking = None;
+                self.speaker = Some(player);
+                self.log(format!("{} : {}", self.name(player), say), WOLF_RED.scale(0.85));
+                self.open_panel(ui.wolf_council, Some(player), say, thought, WOLF_RED)
+            }
+            Event::WolfPick { player, target, .. } => {
+                self.speaker = Some(player);
+                self.mark = Some((target, WOLF_RED));
+                let line = if fr {
+                    format!("{} veut dévorer {}", self.name(player), self.name(target))
+                } else {
+                    format!("{} wants to devour {}", self.name(player), self.name(target))
+                };
+                self.log(line, WOLF_RED);
+                1.3
+            }
+            Event::Pack { target } => {
+                self.speaker = None;
+                self.mark = Some((target, WOLF_RED));
+                let line = if fr { format!("La meute a choisi {}", self.name(target)) } else { format!("The pack chose {}", self.name(target)) };
+                self.log(line.clone(), WOLF_RED);
+                self.open_panel(ui.wolf_council, None, line, String::new(), WOLF_RED).min(2.2)
+            }
+            Event::SeerLook { player, target, wolf, thought } => {
+                self.speaker = Some(player);
+                self.mark = Some((target, SEER_VIOLET));
+                let verdict = match (fr, wolf) {
+                    (true, true) => format!("{} est un LOUP-GAROU !", self.name(target)),
+                    (true, false) => format!("{} n'est pas un loup.", self.name(target)),
+                    (false, true) => format!("{} is a WEREWOLF!", self.name(target)),
+                    (false, false) => format!("{} is not a werewolf.", self.name(target)),
+                };
+                self.log(format!("{} : {verdict}", ui.seer), SEER_VIOLET);
+                self.open_panel(ui.seer_vision, Some(player), verdict, thought, SEER_VIOLET)
+            }
+            Event::Witch { player, victim, save, poison, thought } => {
+                self.speaker = Some(player);
+                let mut parts = Vec::new();
+                if let (true, Some(v)) = (save, victim) {
+                    self.mark = Some((v, WITCH_GREEN));
+                    parts.push(if fr { format!("sauve {}", self.name(v)) } else { format!("saves {}", self.name(v)) });
+                }
+                if let Some(p) = poison {
+                    self.mark = Some((p, SEER_VIOLET));
+                    parts.push(if fr { format!("empoisonne {}", self.name(p)) } else { format!("poisons {}", self.name(p)) });
+                }
+                let text = if parts.is_empty() {
+                    if fr { "garde ses potions.".to_string() } else { "keeps the potions.".to_string() }
+                } else {
+                    format!("{}.", parts.join(if fr { " et " } else { " and " }))
+                };
+                let text = format!("{} {}", self.name(player), text);
+                self.log(format!("{} : {text}", ui.witch), WITCH_GREEN);
+                self.open_panel(ui.witch_brew, Some(player), text, thought, WITCH_GREEN)
+            }
+            Event::Dawn { day, deaths } => {
+                self.night_target = 0.0;
+                self.mark = None;
+                self.speaker = None;
+                self.panel = None;
+                self.tally = vec![0; self.players.len()];
+                self.voting = false;
+                self.banner(format!("{} {day}", ui.day), 3.2);
+                if deaths.is_empty() {
+                    self.log(if fr { "Personne n'est mort cette nuit.".into() } else { "Nobody died last night.".into() }, Rgb(240.0, 220.0, 150.0));
+                }
+                for d in deaths {
+                    self.kill(d);
+                    self.flash = Some((Rgb(180.0, 20.0, 30.0), self.clock + 1.2));
+                    self.shake_until = self.clock + 1.6;
+                    let role = ui.role(self.players[d].role);
+                    let line = if fr { format!("{} est mort cette nuit ({role})", self.name(d)) } else { format!("{} died last night ({role})", self.name(d)) };
+                    self.log(line, Rgb(255.0, 120.0, 110.0));
+                }
+                3.8
+            }
+            Event::Speech { player, round, thought, say } => {
+                self.thinking = None;
+                self.speaker = Some(player);
+                self.mark = None;
+                self.log(format!("{} : {}", self.name(player), say), Rgb::from(self.players[player].model.rgb()).mix(TEXT, 0.4));
+                let title = format!("{} {}", ui.village_square, if round == 2 { "· 2" } else { "" });
+                self.open_panel(title.trim_end(), Some(player), say, thought, Rgb::from(self.players[player].model.rgb()))
+            }
+            Event::Vote { player, target, thought } => {
+                self.voting = true;
+                self.speaker = Some(player);
+                self.mark = Some((target, GOLD));
+                if let Some(t) = self.tally.get_mut(target) {
+                    *t += 1;
+                }
+                self.log(format!("{} \u{2192} {}", self.name(player), self.name(target)), GOLD);
+                let text = if fr {
+                    format!("{} vote contre {}", self.name(player), self.name(target))
+                } else {
+                    format!("{} votes against {}", self.name(player), self.name(target))
+                };
+                (self.open_panel(ui.vote, Some(player), text, thought, GOLD) - 1.4).max(1.0)
+            }
+            Event::Verdict { eliminated, .. } => {
+                self.speaker = None;
+                match eliminated {
+                    Some(p) => {
+                        self.mark = Some((p, WOLF_RED));
+                        self.kill(p);
+                        self.flash = Some((Rgb(255.0, 255.0, 255.0), self.clock + 0.9));
+                        self.shake_until = self.clock + 1.4;
+                        let role = ui.role(self.players[p].role);
+                        let line = if fr {
+                            format!("Le village élimine {} ({role})", self.name(p))
+                        } else {
+                            format!("The village eliminates {} ({role})", self.name(p))
+                        };
+                        self.log(line, Rgb(255.0, 150.0, 90.0));
+                    }
+                    None => {
+                        self.mark = None;
+                        self.log(if fr { "Égalité : personne n'est éliminé.".into() } else { "Tie: nobody is eliminated.".into() }, GOLD);
+                    }
+                }
+                3.0
+            }
+            Event::LastWords { player, thought, say } => {
+                self.speaker = Some(player);
+                self.log(format!("{} : {}", self.name(player), say), DIM);
+                self.open_panel(ui.last_words, Some(player), say, thought, Rgb(200.0, 200.0, 210.0))
+            }
+            Event::Thinking { player } => {
+                self.thinking = Some(player);
+                self.speaker = None;
+                0.0
+            }
+            Event::Usage { cost, .. } => {
+                self.cost += cost;
+                0.0
+            }
+            Event::GameOver { winner } => {
+                self.winner = Some(winner);
+                self.speaker = None;
+                self.mark = None;
+                self.thinking = None;
+                self.night_target = if winner == Team::Wolves { 0.85 } else { 0.0 };
+                self.banner(ui.winner(winner).to_string(), f32::INFINITY);
+                self.log(ui.winner(winner).to_string(), Rgb(255.0, 230.0, 140.0));
+                f32::INFINITY
+            }
+            Event::Aborted { reason } => {
+                self.thinking = None;
+                self.aborted = Some(reason);
+                f32::INFINITY
+            }
+        }
+    }
+
+    fn advance(&mut self) {
+        if let Some(show) = &self.show {
+            if self.clock < show.start + show.dur {
+                return;
+            }
+            self.show = None;
+        }
+        while self.show.is_none() {
+            let Some(e) = self.queue.pop_front() else {
+                break;
+            };
+            let dur = self.begin(e);
+            if dur > 0.0 {
+                self.show = Some(Show { start: self.clock, dur });
+            }
+        }
+    }
+
+    fn skip(&mut self) {
+        let typed_all = self.panel.as_ref().is_none_or(|p| {
+            let n = ((self.clock - p.start) * CPS) as usize;
+            n >= p.say.chars().count() && (!self.show_thoughts || n >= p.thought.chars().count())
+        });
+        if !typed_all {
+            if let Some(p) = &mut self.panel {
+                p.start -= 1000.0;
+            }
+            return;
+        }
+        if let Some(show) = &mut self.show
+            && show.dur.is_finite()
+        {
+            show.dur = 0.0;
+        }
+    }
+
+    fn tick(&mut self, dt: f32) {
+        self.anim += dt;
+        if !self.paused && self.stage == Stage::Game {
+            self.clock += dt * self.speed;
+        }
+        let step = (dt * self.speed.max(0.5) * 0.9).min(1.0);
+        self.night += (self.night_target - self.night) * step;
+        self.pump();
+        if !self.paused {
+            self.advance();
+        }
+    }
+
+    fn key(&mut self, code: KeyCode) {
+        match (&self.stage, code) {
+            (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => self.quit = true,
+            (Stage::Title, KeyCode::Enter) | (Stage::Title, KeyCode::Char(' ')) => self.start(),
+            (Stage::Game, KeyCode::Char(' ')) => self.paused = !self.paused,
+            (Stage::Game, KeyCode::Right) | (Stage::Game, KeyCode::Enter) => self.skip(),
+            (_, KeyCode::Char('t')) => self.show_thoughts = !self.show_thoughts,
+            (_, KeyCode::Char('r')) => self.show_roles = !self.show_roles,
+            (_, KeyCode::Char('c')) => self.crt = !self.crt,
+            (_, KeyCode::Char('+')) | (_, KeyCode::Char('=')) => self.speed = (self.speed * 1.5).min(6.0),
+            (_, KeyCode::Char('-')) => self.speed = (self.speed / 1.5).max(0.4),
+            _ => {}
+        }
+    }
+
+    fn draw(&mut self, f: &mut Frame) {
+        let area = f.area();
+        f.render_widget(Block::new().style(Style::new().bg(BG.color())), area);
+        if area.width < 100 || area.height < 30 {
+            let msg = Paragraph::new(self.ui.too_small).alignment(Alignment::Center).style(fg(TEXT));
+            f.render_widget(msg, Rect::new(area.x, area.y + area.height / 2, area.width, 1));
+            return;
+        }
+        match self.stage {
+            Stage::Title => self.draw_title(f, area),
+            Stage::Game => self.draw_game(f, area),
+        }
+        if self.crt {
+            crt(f.buffer_mut(), area);
+        }
+    }
+
+    fn draw_title(&self, f: &mut Frame, area: Rect) {
+        let below = scene::title(area, f.buffer_mut(), self.anim);
+        let buf = f.buffer_mut();
+        let center = |s: &str| area.x as i32 + (area.width as i32 - s.chars().count() as i32) / 2;
+        let subtitle = self.ui.subtitle;
+        label(buf, center(subtitle), below + 1, subtitle, Rgb(230.0, 230.0, 245.0), false, area);
+        let mut line = format!("{} :", self.ui.lineup_hint);
+        let mut parts = Vec::new();
+        for model in Model::ALL {
+            let n = self.lineup.iter().filter(|m| **m == model).count();
+            if n > 0 {
+                parts.push((format!(" {n} x {}", model.label()), Rgb::from(model.rgb())));
+                line.push_str(&format!(" {n} x {}", model.label()));
+            }
+        }
+        if !self.replay {
+            let mut x = center(&line);
+            let head = format!("{} :", self.ui.lineup_hint);
+            label(buf, x, below + 3, &head, DIM, false, area);
+            x += head.chars().count() as i32;
+            for (text, color) in parts {
+                label(buf, x, below + 3, &text, color, true, area);
+                x += text.chars().count() as i32;
+            }
+        } else {
+            let tag = format!("[ {} ]", self.ui.replay_tag);
+            label(buf, center(&tag), below + 3, &tag, Rgb(255.0, 200.0, 90.0), true, area);
+        }
+        if (self.anim * 1.6).sin() > -0.3 {
+            let press = self.ui.press_enter;
+            label(buf, center(press), below + 5, press, Rgb(255.0, 214.0, 120.0), true, area);
+        }
+        let keys = self.ui.keys;
+        label(buf, center(keys), area.bottom() as i32 - 1, keys, DIM, false, area);
+    }
+
+    fn draw_game(&mut self, f: &mut Frame, area: Rect) {
+        let [top, scene_area, panel_area, bottom] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(14), Constraint::Length(7), Constraint::Length(10)]).areas(area);
+        self.draw_top(f, top);
+
+        let seats: Vec<Seat> = (0..self.players.len())
+            .map(|i| Seat {
+                name: self.players[i].name.clone(),
+                model: self.players[i].model,
+                role: self.players[i].role,
+                alive: self.alive[i],
+                dissolve: self.dissolve_start[i].and_then(|s| {
+                    let p = (self.clock - s) / 1.8;
+                    (p < 1.0).then_some(p.max(0.001))
+                }),
+            })
+            .collect();
+        let banner = self.banner.as_ref().and_then(|b| {
+            let age = self.clock - b.start;
+            let alpha = if b.dur.is_infinite() {
+                (age / 0.6).min(1.0)
+            } else if age > b.dur {
+                0.0
+            } else {
+                (age / 0.35).min(1.0).min((b.dur - age) / 0.6)
+            };
+            (alpha > 0.0).then(|| (b.text.clone(), alpha.clamp(0.0, 1.0)))
+        });
+        let flash = self.flash.and_then(|(c, until)| {
+            let left = until - self.clock;
+            (left > 0.0).then_some((c, (left / 1.2).min(1.0) * 0.45))
+        });
+        let shaken = if self.clock < self.shake_until {
+            let dx: i32 = if (self.anim * 40.0) as i32 % 2 == 0 { 1 } else { -1 };
+            Rect { x: (scene_area.x as i32 + dx).max(0) as u16, ..scene_area }.intersection(scene_area)
+        } else {
+            scene_area
+        };
+        let scene = Scene {
+            seats: &seats,
+            night: self.night,
+            day: self.day,
+            t: self.anim,
+            speaker: self.speaker,
+            thinking: self.thinking,
+            mark: self.mark,
+            show_roles: self.show_roles,
+            banner,
+            flash,
+        };
+        scene.draw(shaken, f.buffer_mut());
+        if let Some(p) = self.thinking {
+            let text = format!("{} {}...", self.name(p), self.ui.thinking);
+            label(f.buffer_mut(), scene_area.x as i32 + 2, scene_area.bottom() as i32 - 1, &text, DIM.mix(TEXT, 0.4), false, scene_area);
+        }
+        if self.paused {
+            let text = format!("  {}  ", self.ui.paused);
+            let x = scene_area.x as i32 + (scene_area.width as i32 - text.len() as i32) / 2;
+            label(f.buffer_mut(), x, scene_area.y as i32 + 1, &text, Rgb(255.0, 230.0, 140.0), true, scene_area);
+        }
+
+        let [speech_area, thought_area] = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).areas(panel_area);
+        self.draw_panels(f, speech_area, thought_area);
+        let [feed_area, roster_area] = Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(bottom);
+        self.draw_feed(f, feed_area);
+        self.draw_roster(f, roster_area);
+        if self.winner.is_some() || self.aborted.is_some() {
+            self.draw_recap(f, scene_area);
+        }
+    }
+
+    fn draw_top(&self, f: &mut Frame, area: Rect) {
+        let alive = self.alive.iter().filter(|a| **a).count();
+        let phase = if self.day == 0 {
+            String::new()
+        } else if self.night_target > 0.5 && self.winner.is_none() {
+            format!("{} {}", self.ui.night, self.day)
+        } else {
+            format!("{} {}", self.ui.day, self.day)
+        };
+        let mut spans = vec![
+            Span::styled(" CCWOLF ", Style::new().fg(Rgb(20.0, 10.0, 20.0).color()).bg(Rgb(232.0, 72.0, 72.0).color()).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {phase}"), fg(TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  ·  {alive} {}", self.ui.alive), fg(DIM)),
+            Span::styled(format!("  ·  {}", self.lang.money(self.cost)), fg(Rgb(255.0, 210.0, 120.0))),
+            Span::styled(format!("  ·  x{:.1}", self.speed), fg(DIM)),
+        ];
+        if self.replay {
+            spans.push(Span::styled(format!("  ·  {}", self.ui.replay_tag), fg(Rgb(255.0, 200.0, 90.0)).add_modifier(Modifier::BOLD)));
+        }
+        let left = Line::from(spans);
+        let right = Line::from(Span::styled(format!("{} ", self.ui.keys), fg(DIM))).alignment(Alignment::Right);
+        f.render_widget(Paragraph::new(left).style(Style::new().bg(PANEL.color())), area);
+        if area.width > 150 {
+            f.render_widget(Paragraph::new(right), area);
+        }
+    }
+
+    fn draw_panels(&self, f: &mut Frame, speech_area: Rect, thought_area: Rect) {
+        let (title, accent) = match &self.panel {
+            Some(p) => (p.title.clone(), p.accent),
+            None => (self.ui.village_square.to_string(), DIM),
+        };
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(fg(accent))
+            .title(Span::styled(format!(" {title} "), fg(accent).add_modifier(Modifier::BOLD)))
+            .style(Style::new().bg(PANEL.color()));
+        let thought_block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(fg(THOUGHT.scale(0.7)))
+            .title(Span::styled(format!(" {} ", self.ui.secret_thought), fg(THOUGHT).add_modifier(Modifier::BOLD)))
+            .style(Style::new().bg(PANEL.color()));
+        let Some(p) = &self.panel else {
+            f.render_widget(block, speech_area);
+            f.render_widget(thought_block, thought_area);
+            return;
+        };
+        let typed = ((self.clock - p.start) * CPS).max(0.0) as usize;
+        let cut = |s: &str| s.chars().take(typed).collect::<String>();
+        let mut lines = Vec::new();
+        if let Some(w) = p.who {
+            let info = &self.players[w];
+            let mut head = vec![
+                Span::styled(info.name.clone(), fg(Rgb::from(info.model.rgb())).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  {}", info.model.label()), fg(Rgb::from(info.model.rgb()).scale(0.75))),
+                Span::styled(format!("  ·  {}", info.persona), fg(DIM)),
+            ];
+            if self.show_roles {
+                head.push(Span::styled(format!("  [{}]", self.ui.role(info.role)), fg(role_color(info.role)).add_modifier(Modifier::BOLD)));
+            }
+            lines.push(Line::from(head));
+        }
+        let said = cut(&p.say);
+        let cursor = if typed < p.say.chars().count() && (self.anim * 4.0) as i32 % 2 == 0 { "\u{2588}" } else { "" };
+        let said = if p.who.is_some()
+            && self.speaker == p.who
+            && matches!(p.title.as_str(), t if t.starts_with(self.ui.village_square) || t == self.ui.wolf_council || t == self.ui.last_words)
+        {
+            crate::prompts::quote(self.lang, &said)
+        } else {
+            said
+        };
+        lines.push(Line::from(vec![Span::styled(said, fg(TEXT)), Span::styled(cursor, fg(accent))]));
+        f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: true }), speech_area);
+
+        let body = if self.show_thoughts {
+            Line::from(Span::styled(cut(&p.thought), fg(THOUGHT).add_modifier(Modifier::ITALIC)))
+        } else {
+            Line::from(Span::styled("[t]", fg(DIM)))
+        };
+        f.render_widget(Paragraph::new(body).block(thought_block).wrap(Wrap { trim: true }), thought_area);
+    }
+
+    fn draw_feed(&self, f: &mut Frame, area: Rect) {
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(fg(DIM.scale(0.6)))
+            .title(Span::styled(format!(" {} ", self.ui.chronicle), fg(DIM).add_modifier(Modifier::BOLD)))
+            .style(Style::new().bg(PANEL.color()));
+        let inner = block.inner(area);
+        let width = inner.width.saturating_sub(1) as usize;
+        let rows = inner.height as usize;
+        let lines: Vec<Line> = self
+            .feed
+            .iter()
+            .rev()
+            .take(rows)
+            .rev()
+            .map(|(text, color)| {
+                let text: String = text.chars().take(width).collect();
+                Line::from(Span::styled(text, fg(*color)))
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    fn draw_roster(&self, f: &mut Frame, area: Rect) {
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(fg(DIM.scale(0.6)))
+            .title(Span::styled(format!(" {} ", self.ui.roster), fg(DIM).add_modifier(Modifier::BOLD)))
+            .style(Style::new().bg(PANEL.color()));
+        let max_votes = self.tally.iter().copied().max().unwrap_or(0).max(1);
+        let lines: Vec<Line> = (0..self.players.len())
+            .map(|i| {
+                let p = &self.players[i];
+                let alive = self.alive[i];
+                let name_style = if alive { fg(TEXT).add_modifier(Modifier::BOLD) } else { fg(DIM).add_modifier(Modifier::CROSSED_OUT) };
+                let mut spans = vec![
+                    Span::styled("\u{25cf} ", fg(Rgb::from(p.model.rgb()))),
+                    Span::styled(format!("{:<8}", p.name), name_style),
+                    Span::styled(format!("{:<11}", p.model.label()), fg(Rgb::from(p.model.rgb()).scale(if alive { 0.9 } else { 0.5 }))),
+                ];
+                if self.show_roles || !alive {
+                    spans.push(Span::styled(format!("{:<11}", self.ui.role(p.role)), fg(role_color(p.role).scale(if alive { 1.0 } else { 0.6 }))));
+                } else {
+                    spans.push(Span::styled(format!("{:<11}", "?"), fg(DIM)));
+                }
+                if self.voting && self.tally[i] > 0 {
+                    let bar = "\u{2588}".repeat(((self.tally[i] as f32 / max_votes as f32) * 6.0).ceil() as usize);
+                    spans.push(Span::styled(format!("{bar} {}", self.tally[i]), fg(GOLD)));
+                }
+                Line::from(spans)
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
+    fn draw_recap(&self, f: &mut Frame, scene: Rect) {
+        let w = 64.min(scene.width.saturating_sub(4));
+        let h = (self.players.len() as u16 + 6).min(scene.height.saturating_sub(2));
+        let area = Rect::new(scene.x + (scene.width - w) / 2, scene.y + scene.height.saturating_sub(h) / 2 + 2, w, h);
+        f.render_widget(Clear, area);
+        let (title, color) = match (self.winner, &self.aborted) {
+            (Some(team), _) => (self.ui.winner(team).to_string(), if team == Team::Wolves { WOLF_RED } else { Rgb(255.0, 214.0, 120.0) }),
+            (None, Some(_)) => (self.ui.aborted.to_string(), WOLF_RED),
+            (None, None) => (String::new(), TEXT),
+        };
+        let block = Block::bordered()
+            .border_type(BorderType::Double)
+            .border_style(fg(color))
+            .title(Span::styled(format!(" {title} "), fg(color).add_modifier(Modifier::BOLD)))
+            .title_alignment(Alignment::Center)
+            .style(Style::new().bg(Rgb(8.0, 8.0, 16.0).color()));
+        let mut lines = Vec::new();
+        if let Some(reason) = &self.aborted {
+            lines.push(Line::from(Span::styled(reason.clone(), fg(TEXT))));
+        }
+        for (i, p) in self.players.iter().enumerate() {
+            let alive = self.alive[i];
+            lines.push(Line::from(vec![
+                Span::styled("\u{25cf} ", fg(Rgb::from(p.model.rgb()))),
+                Span::styled(format!("{:<9}", p.name), fg(TEXT).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{:<12}", p.model.label()), fg(Rgb::from(p.model.rgb()))),
+                Span::styled(format!("{:<13}", self.ui.role(p.role)), fg(role_color(p.role))),
+                Span::styled(if alive { self.ui.survived } else { self.ui.dead }, fg(if alive { WITCH_GREEN } else { DIM })),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} : ", self.ui.total_cost), fg(DIM)),
+            Span::styled(self.lang.money(self.cost), fg(Rgb(255.0, 210.0, 120.0)).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("      {}", self.ui.game_over_hint), fg(DIM)),
+        ]));
+        f.render_widget(Paragraph::new(lines).block(block), area);
+    }
+}
+
+fn crt(buf: &mut Buffer, area: Rect) {
+    let (w, h) = (area.width as f32, area.height as f32);
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let nx = (x - area.x) as f32 / w * 2.0 - 1.0;
+            let ny = (y - area.y) as f32 / h * 2.0 - 1.0;
+            let vignette = 1.0 - 0.32 * (nx * nx * 0.55 + ny * ny * 0.8).min(1.0);
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                let half = cell.symbol() == "\u{2580}";
+                if let Some(c) = Rgb::of(cell.fg) {
+                    cell.fg = c.scale(vignette).color();
+                }
+                if let Some(c) = Rgb::of(cell.bg) {
+                    let scan = if half {
+                        0.9
+                    } else if y % 2 == 0 {
+                        0.93
+                    } else {
+                        1.0
+                    };
+                    cell.bg = c.scale(vignette * scan).color();
+                }
+            }
+        }
+    }
+}
+
+pub fn run(source: Source, opts: Options) -> io::Result<()> {
+    let mut app = App::new(source, opts);
+    let mut terminal = ratatui::init();
+    let mut last = Instant::now();
+    let result = loop {
+        let now = Instant::now();
+        let dt = (now - last).as_secs_f32().min(0.2);
+        last = now;
+        app.tick(dt);
+        if let Err(e) = terminal.draw(|f| app.draw(f)) {
+            break Err(e);
+        }
+        match event::poll(Duration::from_millis(30)) {
+            Ok(true) => {
+                if let Ok(Input::Key(k)) = event::read()
+                    && k.kind == KeyEventKind::Press
+                {
+                    if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
+                        app.quit = true;
+                    } else {
+                        app.key(k.code);
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(e) => break Err(e),
+        }
+        if app.quit {
+            break Ok(());
+        }
+    };
+    ratatui::restore();
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::{Agent, Engine, SEATS, ScriptedAgent, deal};
+    use crate::model::lineup;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn recorded(lang: Lang) -> Vec<Event> {
+        let players = deal(4, lang, &lineup("mixed").unwrap());
+        let agents: Vec<Box<dyn Agent>> = (0..SEATS).map(|i| Box::new(ScriptedAgent::new(4, i)) as Box<dyn Agent>).collect();
+        let mut events = Vec::new();
+        Engine::new(4, lang, players, agents).run(&mut |e: &Event| events.push(e.clone()));
+        events
+    }
+
+    #[test]
+    fn a_whole_game_plays_through_the_screen_without_panicking() {
+        for lang in [Lang::Fr, Lang::En] {
+            let opts = Options { lang, crt: true, speed: 1.0, lineup: lineup("mixed").unwrap(), replay: true };
+            let mut app = App::new(Source::Replay(recorded(lang)), opts);
+            let mut terminal = Terminal::new(TestBackend::new(140, 44)).unwrap();
+            terminal.draw(|f| app.draw(f)).unwrap();
+            app.start();
+            for _ in 0..4000 {
+                app.tick(0.1);
+                app.skip();
+                terminal.draw(|f| app.draw(f)).unwrap();
+                if app.winner.is_some() {
+                    break;
+                }
+            }
+            assert!(app.winner.is_some(), "the replay should reach the end");
+            let mut small = Terminal::new(TestBackend::new(60, 20)).unwrap();
+            small.draw(|f| app.draw(f)).unwrap();
+        }
+    }
+
+    fn snapshot(buf: &Buffer, path: &std::path::Path) {
+        let (cw, ch) = (8usize, 16usize);
+        let (w, h) = (buf.area.width as usize * cw, buf.area.height as usize * ch);
+        let mut px = vec![0u8; w * h * 3];
+        let mut put = |x: usize, y: usize, c: Rgb| {
+            if x < w && y < h {
+                let i = (y * w + x) * 3;
+                px[i] = c.0.clamp(0.0, 255.0) as u8;
+                px[i + 1] = c.1.clamp(0.0, 255.0) as u8;
+                px[i + 2] = c.2.clamp(0.0, 255.0) as u8;
+            }
+        };
+        for row in 0..buf.area.height {
+            for col in 0..buf.area.width {
+                let cell = buf.cell((col, row)).unwrap();
+                let fgc = Rgb::of(cell.fg).unwrap_or(TEXT);
+                let bgc = Rgb::of(cell.bg).unwrap_or(BG);
+                let (x0, y0) = (col as usize * cw, row as usize * ch);
+                for dy in 0..ch {
+                    for dx in 0..cw {
+                        let c = if cell.symbol() == "\u{2580}" { if dy < ch / 2 { fgc } else { bgc } } else { bgc };
+                        put(x0 + dx, y0 + dy, c);
+                    }
+                }
+                let sym = cell.symbol().chars().next().unwrap_or(' ');
+                if sym == '\u{2580}' || sym == ' ' {
+                    continue;
+                }
+                if let Some(rows) = canvas::glyph(sym) {
+                    for (gy, line) in rows.iter().enumerate() {
+                        for (gx, bit) in line.chars().enumerate() {
+                            if bit == '#' {
+                                put(x0 + 1 + gx, y0 + 4 + gy, fgc);
+                            }
+                        }
+                    }
+                } else if sym == '\u{2588}' {
+                    for dy in 0..ch {
+                        for dx in 0..cw {
+                            put(x0 + dx, y0 + dy, fgc);
+                        }
+                    }
+                } else if !sym.is_whitespace() {
+                    for dy in 7..10 {
+                        for dx in 2..6 {
+                            put(x0 + dx, y0 + dy, fgc);
+                        }
+                    }
+                }
+            }
+        }
+        let mut file = format!("P6\n{w} {h}\n255\n").into_bytes();
+        file.extend(px);
+        std::fs::write(path, file).unwrap();
+    }
+
+    #[test]
+    fn snapshots_for_eyeballing() {
+        let Ok(dir) = std::env::var("CCWOLF_SNAPSHOTS") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = Options { lang: Lang::Fr, crt: true, speed: 1.0, lineup: lineup("mixed").unwrap(), replay: false };
+        let mut app = App::new(Source::Replay(recorded(Lang::Fr)), opts);
+        let mut terminal = Terminal::new(TestBackend::new(170, 52)).unwrap();
+        app.anim = 3.0;
+        terminal.draw(|f| app.draw(f)).unwrap();
+        snapshot(terminal.backend().buffer(), &dir.join("00-title.ppm"));
+        app.start();
+        let marks = [2.0, 5.0, 9.0, 14.0, 19.0, 26.0, 40.0, 60.0, 90.0, 140.0];
+        let mut next = 0;
+        let mut t = 0.0;
+        while next < marks.len() && t < 400.0 {
+            app.tick(0.05);
+            t += 0.05;
+            if t >= marks[next] {
+                terminal.draw(|f| app.draw(f)).unwrap();
+                snapshot(terminal.backend().buffer(), &dir.join(format!("{:02}-t{}.ppm", next + 1, marks[next] as u32)));
+                next += 1;
+            }
+        }
+    }
+}

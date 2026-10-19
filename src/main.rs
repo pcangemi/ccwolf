@@ -1,0 +1,187 @@
+mod claude;
+mod game;
+mod lang;
+mod model;
+mod prompts;
+mod record;
+mod rng;
+mod stats;
+mod ui;
+
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::mpsc::Sender;
+
+use claude::{Claude, LlmAgent};
+use game::{Agent, Engine, Event, PlayerInfo, ScriptedAgent, deal};
+use lang::Lang;
+use model::Model;
+use record::Recorder;
+
+const DEMO_FR: &str = include_str!("../replays/demo-fr.jsonl");
+const DEMO_EN: &str = include_str!("../replays/demo-en.jsonl");
+
+const HELP: &str = "ccwolf: werewolf in the terminal, played by Claude models
+
+USAGE
+  ccwolf                     watch 8 Claude models play (needs ANTHROPIC_API_KEY)
+  ccwolf --demo              watch a recorded game, no API key needed
+  ccwolf --replay FILE       watch one of your recorded games again
+  ccwolf stats [DIR]         who lies best: results by model over your recorded games
+
+OPTIONS
+  --lang fr|en               language of the game and of the players (default: your locale)
+  --lineup SPEC              mixed (default: 2 x Haiku, Sonnet, Opus, Fable), haiku, sonnet,
+                             opus, fable, or 8 comma-separated models
+  --seed N                   deal the same roles and seats again
+  --speed X                  playback speed, 0.4 to 6 (default 1)
+  --no-crt                   turn off the scanlines and the vignette
+  --headless                 no screen: print the game as text
+  --games N                  with --headless, play N games in a row
+  --out DIR                  where games are recorded (default ~/.ccwolf/games)
+  --scripted                 players answer at random without the API, to test the screen
+  -h, --help                 this help
+  -V, --version              the version
+
+KEYS
+  t thoughts   r roles   c crt   space pause   right skip   + - speed   q quit";
+
+struct Args {
+    lang: Lang,
+    lineup: Vec<Model>,
+    seed: Option<u64>,
+    speed: f32,
+    crt: bool,
+    demo: bool,
+    replay: Option<PathBuf>,
+    headless: bool,
+    games: u32,
+    scripted: bool,
+    out: PathBuf,
+    stats: Option<PathBuf>,
+}
+
+fn parse_args() -> Result<Option<Args>, String> {
+    let mut args = Args {
+        lang: Lang::from_env(),
+        lineup: model::lineup("mixed").expect("mixed lineup"),
+        seed: None,
+        speed: 1.0,
+        crt: true,
+        demo: false,
+        replay: None,
+        headless: false,
+        games: 1,
+        scripted: false,
+        out: record::default_dir(),
+        stats: None,
+    };
+    let mut it = std::env::args().skip(1);
+    while let Some(arg) = it.next() {
+        let mut value = |name: &str| it.next().ok_or(format!("{name} needs a value"));
+        match arg.as_str() {
+            "-h" | "--help" => {
+                println!("{HELP}");
+                return Ok(None);
+            }
+            "-V" | "--version" => {
+                println!("ccwolf {}", env!("CARGO_PKG_VERSION"));
+                return Ok(None);
+            }
+            "--lang" => args.lang = Lang::parse(&value("--lang")?).ok_or("--lang takes fr or en")?,
+            "--lineup" => args.lineup = model::lineup(&value("--lineup")?).ok_or("--lineup takes mixed, one model name, or 8 comma-separated models")?,
+            "--seed" => args.seed = Some(value("--seed")?.parse().map_err(|_| "--seed takes a number")?),
+            "--speed" => args.speed = value("--speed")?.parse::<f32>().map_err(|_| "--speed takes a number")?.clamp(0.4, 6.0),
+            "--games" => args.games = value("--games")?.parse().map_err(|_| "--games takes a number")?,
+            "--out" => args.out = PathBuf::from(value("--out")?),
+            "--replay" => args.replay = Some(PathBuf::from(value("--replay")?)),
+            "--no-crt" => args.crt = false,
+            "--demo" => args.demo = true,
+            "--headless" => args.headless = true,
+            "--scripted" => args.scripted = true,
+            "stats" => args.stats = Some(it.next().map(PathBuf::from).unwrap_or_else(record::default_dir)),
+            other => return Err(format!("unknown argument {other}, see ccwolf --help")),
+        }
+    }
+    Ok(Some(args))
+}
+
+fn agents(args: &Args, seed: u64, players: &[PlayerInfo]) -> Result<Vec<Box<dyn Agent>>, String> {
+    if args.scripted {
+        return Ok((0..players.len()).map(|i| Box::new(ScriptedAgent::new(seed, i)) as Box<dyn Agent>).collect());
+    }
+    let claude = Claude::from_env().ok_or("ANTHROPIC_API_KEY is not set. Set it to play, or run ccwolf --demo to watch a recorded game.")?;
+    Ok((0..players.len()).map(|i| Box::new(LlmAgent::new(claude.clone(), i, args.lang, players)) as Box<dyn Agent>).collect())
+}
+
+fn headless(args: &Args) -> Result<(), String> {
+    let base = args.seed.unwrap_or_else(rng::seed_from_clock);
+    for g in 0..args.games.max(1) {
+        let seed = base + g as u64;
+        let players = deal(seed, args.lang, &args.lineup);
+        let agents = agents(args, seed, &players)?;
+        let mut recorder = Recorder::create(&args.out, seed).map_err(|e| e.to_string())?;
+        let mut cost = 0.0;
+        let mut out = std::io::stdout().lock();
+        Engine::new(seed, args.lang, players.clone(), agents).run(&mut |e: &Event| {
+            recorder.write(e);
+            if let Event::Usage { cost: c, .. } = e {
+                cost += c;
+            }
+            for line in prompts::narrate(args.lang, e, &players) {
+                if writeln!(out, "{line}").is_err() {
+                    break;
+                }
+            }
+        });
+        let summary = format!("{}: {}\n{}\n", args.lang.ui().total_cost, args.lang.money(cost), recorder.path().display());
+        if writeln!(out, "{summary}").is_err() {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn watch(args: Args) -> Result<(), String> {
+    let options = |lang: Lang, replay: bool| ui::Options { lang, crt: args.crt, speed: args.speed, lineup: args.lineup.clone(), replay };
+    if args.demo || args.replay.is_some() {
+        let events = match &args.replay {
+            Some(path) => record::load(path)?,
+            None => record::parse(if args.lang == Lang::Fr { DEMO_FR } else { DEMO_EN })?,
+        };
+        let lang = match events.first() {
+            Some(Event::Setup { lang, .. }) => *lang,
+            _ => args.lang,
+        };
+        return ui::run(ui::Source::Replay(events), options(lang, true)).map_err(|e| e.to_string());
+    }
+    let seed = args.seed.unwrap_or_else(rng::seed_from_clock);
+    let players = deal(seed, args.lang, &args.lineup);
+    let agents = agents(&args, seed, &players)?;
+    let mut recorder = Recorder::create(&args.out, seed).map_err(|e| e.to_string())?;
+    let path = recorder.path().to_path_buf();
+    let lang = args.lang;
+    let launch: ui::Launch = Box::new(move |tx: Sender<Event>| {
+        Engine::new(seed, lang, players, agents).run(&mut |e: &Event| {
+            recorder.write(e);
+            let _ = tx.send(e.clone());
+        });
+    });
+    ui::run(ui::Source::Live(launch), options(lang, false)).map_err(|e| e.to_string())?;
+    println!("ccwolf --replay {}", path.display());
+    Ok(())
+}
+
+fn main() {
+    let result = match parse_args() {
+        Ok(None) => Ok(()),
+        Ok(Some(args)) if args.stats.is_some() => stats::print(args.stats.as_deref().expect("stats dir"), args.lang),
+        Ok(Some(args)) if args.headless => headless(&args),
+        Ok(Some(args)) => watch(args),
+        Err(e) => Err(e),
+    };
+    if let Err(e) = result {
+        eprintln!("ccwolf: {e}");
+        std::process::exit(1);
+    }
+}
