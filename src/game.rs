@@ -255,12 +255,20 @@ impl Engine {
             handles.into_iter().map(|h| h.join().expect("agent thread panicked")).collect()
         });
         let mut actions = Vec::new();
+        let mut failure = None;
         for (p, result, task) in replies {
-            let reply = result?;
-            self.record_usage(p, &reply.usage, emit);
-            actions.push((p, reply.action.unwrap_or_else(|| fallback(&task))));
+            match result {
+                Ok(reply) => {
+                    self.record_usage(p, &reply.usage, emit);
+                    actions.push((p, reply.action.unwrap_or_else(|| fallback(&task))));
+                }
+                Err(e) => failure = failure.or(Some(e)),
+            }
         }
-        Ok(actions)
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(actions),
+        }
     }
 
     fn record_usage(&mut self, p: usize, usage: &Usage, emit: Emit) {

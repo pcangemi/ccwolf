@@ -82,7 +82,7 @@ impl LlmAgent {
         self.players.iter().position(|p| p.name.to_lowercase() == wanted)
     }
 
-    fn request(&self, tool: &str, max_tokens: u32) -> Value {
+    fn request(&self, max_tokens: u32) -> Value {
         let mut messages = self.messages.clone();
         for message in messages.iter_mut() {
             if let Some(blocks) = message["content"].as_array_mut() {
@@ -101,17 +101,23 @@ impl LlmAgent {
             "max_tokens": max_tokens,
             "system": [{ "type": "text", "text": self.system, "cache_control": { "type": "ephemeral" } }],
             "tools": self.tools,
-            "tool_choice": { "type": "tool", "name": tool, "disable_parallel_tool_use": true },
+            "tool_choice": { "type": "tool", "name": prompts::TOOL, "disable_parallel_tool_use": true },
             "messages": messages,
         })
     }
 
     fn parse(&self, task: &Task, input: &Value) -> Option<Action> {
         let text = |key: &str| input[key].as_str().unwrap_or_default().trim().to_string();
-        match prompts::tool_for(task) {
-            "speak" => Some(Action::Speak { thought: text("thought"), say: text("speech") }),
-            "choose" => Some(Action::Choose { thought: text("thought"), target: self.player(&text("target")) }),
-            _ => Some(Action::Potion { thought: text("thought"), save: input["save"].as_bool().unwrap_or(false), poison: self.player(&text("poison")) }),
+        let thought = text("thought");
+        match task {
+            Task::WolfTalk { .. } | Task::Speak { .. } | Task::LastWords => {
+                let say = text("speech");
+                (!say.is_empty()).then_some(Action::Speak { thought, say })
+            }
+            Task::WolfPick { .. } | Task::Seer { .. } | Task::Vote { .. } => {
+                self.player(&text("target")).map(|target| Action::Choose { thought, target: Some(target) })
+            }
+            Task::Witch { .. } => Some(Action::Potion { thought, save: input["save"].as_bool().unwrap_or(false), poison: self.player(&text("poison")) }),
         }
     }
 }
@@ -135,19 +141,17 @@ impl Agent for LlmAgent {
         content.push(json!({ "type": "text", "text": text }));
         self.messages.push(json!({ "role": "user", "content": content }));
 
-        let tool = prompts::tool_for(task);
         let mut usage = Usage::default();
-        for max_tokens in [700, 1600] {
-            let response = self.claude.message(&self.request(tool, max_tokens))?;
+        for max_tokens in [700, 1600, 1600] {
+            let response = self.claude.message(&self.request(max_tokens))?;
             usage.add(&usage_of(&response));
             let truncated = response["stop_reason"].as_str() == Some("max_tokens");
             let call = response["content"].as_array().and_then(|blocks| blocks.iter().find(|b| b["type"] == "tool_use")).cloned();
-            if let (false, Some(call)) = (truncated, call) {
-                let action = self.parse(task, &call["input"]);
-                self.pending_tool = call["id"].as_str().map(String::from);
-                self.messages.push(json!({ "role": "assistant", "content": [call] }));
-                return Ok(Reply { action, usage });
-            }
+            let Some(call) = call.filter(|_| !truncated) else { continue };
+            let Some(action) = self.parse(task, &call["input"]) else { continue };
+            self.pending_tool = call["id"].as_str().map(String::from);
+            self.messages.push(json!({ "role": "assistant", "content": [call] }));
+            return Ok(Reply { action: Some(action), usage });
         }
         self.messages.pop();
         Err(format!("{} gave no usable answer", self.model.label()))
@@ -173,11 +177,11 @@ mod tests {
         a.messages.push(json!({ "role": "assistant", "content": [{ "type": "tool_use", "id": "x", "name": "speak", "input": {} }] }));
         a.messages
             .push(json!({ "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "x", "content": "ok" }, { "type": "text", "text": "b" }] }));
-        let body = a.request("speak", 700);
+        let body = a.request(700);
         let marks = body["messages"].to_string().matches("cache_control").count();
         assert_eq!(marks, 1);
         assert!(body["messages"][2]["content"][1]["cache_control"].is_object());
-        assert_eq!(body["tool_choice"]["name"], "speak");
+        assert_eq!(body["tool_choice"]["name"], prompts::TOOL);
     }
 
     #[test]
@@ -191,5 +195,17 @@ mod tests {
             &json!({ "thought": "t", "save": false, "poison": "personne" }),
         );
         assert_eq!(action, Some(Action::Potion { thought: "t".into(), save: false, poison: None }));
+    }
+
+    #[test]
+    fn an_answer_missing_the_asked_field_is_rejected_so_it_can_be_retried() {
+        let a = agent();
+        assert_eq!(a.parse(&Task::Speak { day: 1, round: 1 }, &json!({ "thought": "t" })), None);
+        assert_eq!(a.parse(&Task::Vote { day: 1, targets: vec![1] }, &json!({ "thought": "t", "target": "Nobody At All" })), None);
+        let name = a.players[2].name.clone();
+        assert_eq!(
+            a.parse(&Task::Vote { day: 1, targets: vec![2] }, &json!({ "thought": "t", "target": name })),
+            Some(Action::Choose { thought: "t".into(), target: Some(2) })
+        );
     }
 }

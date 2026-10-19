@@ -38,7 +38,7 @@ OPTIONS
   --no-crt                   turn off the scanlines and the vignette
   --headless                 no screen: print the game as text
   --games N                  with --headless, play N games in a row
-  --out DIR                  where games are recorded (default ~/.ccwolf/games)
+  --out DIR                  where games are recorded (default ~/.ccwolf/games, none with --scripted)
   --scripted                 players answer at random without the API, to test the screen
   -h, --help                 this help
   -V, --version              the version
@@ -57,7 +57,7 @@ struct Args {
     headless: bool,
     games: u32,
     scripted: bool,
-    out: PathBuf,
+    out: Option<PathBuf>,
     stats: Option<PathBuf>,
 }
 
@@ -73,7 +73,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         headless: false,
         games: 1,
         scripted: false,
-        out: record::default_dir(),
+        out: None,
         stats: None,
     };
     let mut it = std::env::args().skip(1);
@@ -93,7 +93,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--seed" => args.seed = Some(value("--seed")?.parse().map_err(|_| "--seed takes a number")?),
             "--speed" => args.speed = value("--speed")?.parse::<f32>().map_err(|_| "--speed takes a number")?.clamp(0.4, 6.0),
             "--games" => args.games = value("--games")?.parse().map_err(|_| "--games takes a number")?,
-            "--out" => args.out = PathBuf::from(value("--out")?),
+            "--out" => args.out = Some(PathBuf::from(value("--out")?)),
             "--replay" => args.replay = Some(PathBuf::from(value("--replay")?)),
             "--no-crt" => args.crt = false,
             "--demo" => args.demo = true,
@@ -114,17 +114,28 @@ fn agents(args: &Args, seed: u64, players: &[PlayerInfo]) -> Result<Vec<Box<dyn 
     Ok((0..players.len()).map(|i| Box::new(LlmAgent::new(claude.clone(), i, args.lang, players)) as Box<dyn Agent>).collect())
 }
 
+fn recorder(args: &Args, seed: u64) -> Result<Option<Recorder>, String> {
+    let dir = match (&args.out, args.scripted) {
+        (Some(dir), _) => dir.clone(),
+        (None, true) => return Ok(None),
+        (None, false) => record::default_dir(),
+    };
+    Recorder::create(&dir, seed).map(Some).map_err(|e| e.to_string())
+}
+
 fn headless(args: &Args) -> Result<(), String> {
     let base = args.seed.unwrap_or_else(rng::seed_from_clock);
     for g in 0..args.games.max(1) {
         let seed = base + g as u64;
         let players = deal(seed, args.lang, &args.lineup);
         let agents = agents(args, seed, &players)?;
-        let mut recorder = Recorder::create(&args.out, seed).map_err(|e| e.to_string())?;
+        let mut recorder = recorder(args, seed)?;
         let mut cost = 0.0;
         let mut out = std::io::stdout().lock();
         Engine::new(seed, args.lang, players.clone(), agents).run(&mut |e: &Event| {
-            recorder.write(e);
+            if let Some(r) = recorder.as_mut() {
+                r.write(e);
+            }
             if let Event::Usage { cost: c, .. } = e {
                 cost += c;
             }
@@ -134,12 +145,17 @@ fn headless(args: &Args) -> Result<(), String> {
                 }
             }
         });
-        let summary = format!("{}: {}\n{}\n", args.lang.ui().total_cost, args.lang.money(cost), recorder.path().display());
+        let saved = recorder.as_ref().map(|r| r.path().display().to_string()).unwrap_or_default();
+        let summary = format!("{}: {}\n{saved}\n", args.lang.ui().total_cost, args.lang.money(cost));
         if writeln!(out, "{summary}").is_err() {
             return Ok(());
         }
     }
     Ok(())
+}
+
+fn screen_error(e: std::io::Error) -> String {
+    format!("cannot open the terminal screen ({e}), run ccwolf in an interactive terminal or use --headless")
 }
 
 fn watch(args: Args) -> Result<(), String> {
@@ -149,26 +165,33 @@ fn watch(args: Args) -> Result<(), String> {
             Some(path) => record::load(path)?,
             None => record::parse(if args.lang == Lang::Fr { DEMO_FR } else { DEMO_EN })?,
         };
+        if !matches!(events.first(), Some(Event::Setup { .. })) {
+            return Err("this build has no recorded demo game".into());
+        }
         let lang = match events.first() {
             Some(Event::Setup { lang, .. }) => *lang,
             _ => args.lang,
         };
-        return ui::run(ui::Source::Replay(events), options(lang, true)).map_err(|e| e.to_string());
+        return ui::run(ui::Source::Replay(events), options(lang, true)).map_err(screen_error);
     }
     let seed = args.seed.unwrap_or_else(rng::seed_from_clock);
     let players = deal(seed, args.lang, &args.lineup);
     let agents = agents(&args, seed, &players)?;
-    let mut recorder = Recorder::create(&args.out, seed).map_err(|e| e.to_string())?;
-    let path = recorder.path().to_path_buf();
+    let mut recorder = recorder(&args, seed)?;
+    let path = recorder.as_ref().map(|r| r.path().to_path_buf());
     let lang = args.lang;
     let launch: ui::Launch = Box::new(move |tx: Sender<Event>| {
         Engine::new(seed, lang, players, agents).run(&mut |e: &Event| {
-            recorder.write(e);
+            if let Some(r) = recorder.as_mut() {
+                r.write(e);
+            }
             let _ = tx.send(e.clone());
         });
     });
-    ui::run(ui::Source::Live(launch), options(lang, false)).map_err(|e| e.to_string())?;
-    println!("ccwolf --replay {}", path.display());
+    ui::run(ui::Source::Live(launch), options(lang, false)).map_err(screen_error)?;
+    if let Some(path) = path {
+        println!("ccwolf --replay {}", path.display());
+    }
     Ok(())
 }
 

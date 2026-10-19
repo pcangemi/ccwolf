@@ -801,7 +801,7 @@ fn crt(buf: &mut Buffer, area: Rect) {
 
 pub fn run(source: Source, opts: Options) -> io::Result<()> {
     let mut app = App::new(source, opts);
-    let mut terminal = ratatui::init();
+    let mut terminal = ratatui::try_init()?;
     let mut last = Instant::now();
     let result = loop {
         let now = Instant::now();
