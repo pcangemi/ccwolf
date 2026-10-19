@@ -29,8 +29,9 @@ ccwolf --lang fr       # ou --lang en
 ccwolf --lineup haiku  # huit Haiku, la partie la moins chère
 ```
 
-Une partie mixte coûte environ COST_MIXED_FR. Une partie avec huit Haiku coûte environ
-COST_HAIKU_FR. Le coût s'affiche en direct en haut de l'écran.
+Une partie mixte coûte environ 0,80 $, surtout pour Fable. Une partie avec huit Haiku coûte
+environ 0,02 $. Le coût s'affiche en direct en haut de l'écran. `--effort low` fait moins
+réfléchir les modèles, pour une partie moins chère et plus rapide.
 
 ## Le détecteur de mensonges (optionnel)
 

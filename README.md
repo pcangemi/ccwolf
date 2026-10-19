@@ -30,8 +30,9 @@ ccwolf --lang en       # or --lang fr
 ccwolf --lineup haiku  # eight Haiku, the cheapest game
 ```
 
-A mixed game costs about COST_MIXED. An all-Haiku game costs about COST_HAIKU. The running cost
-is shown at the top of the screen.
+A mixed game costs about $0.80, most of it for Fable. An all-Haiku game costs about $0.02.
+The running cost is shown at the top of the screen. `--effort low` makes the models think less,
+for a cheaper and faster game.
 
 ## The lie detector (optional)
 
