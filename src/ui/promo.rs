@@ -17,6 +17,8 @@ use crate::game::Event;
 #[derive(Debug, Deserialize)]
 pub struct Storyboard {
     pub shots: Vec<Shot>,
+    #[serde(default)]
+    pub howl: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,10 +178,30 @@ fn sfx_for(e: &Event) -> Vec<Sfx> {
 }
 
 const MUSIC_LEVEL: f32 = 0.6;
+const HOWL_PEAK: f32 = 0.35;
+const SYNTH_HOWL_SECONDS: f32 = 2.4;
+
+fn decode(path: &Path) -> Result<Vec<f32>, String> {
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-f", "f32le", "-ac", "1", "-ar", &super::sound::RATE.to_string(), "-"])
+        .output()
+        .map_err(|e| format!("cannot start ffmpeg: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("{}: ffmpeg cannot read it", path.display()));
+    }
+    Ok(output.stdout.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect())
+}
 
 pub fn render(events: Vec<Event>, opts: Options, video: VideoOptions, storyboard: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(storyboard).map_err(|e| format!("{}: {e}", storyboard.display()))?;
     let board: Storyboard = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", storyboard.display()))?;
+    let howl = match &board.howl {
+        Some(file) => Some(decode(&storyboard.parent().unwrap_or(Path::new(".")).join(file))?),
+        None => None,
+    };
+    let howl_seconds = howl.as_ref().map_or(SYNTH_HOWL_SECONDS, |h| h.len() as f32 / super::sound::RATE as f32);
     let mut last = 0.0;
     for shot in &board.shots {
         if let Shot::Play { from, to, .. } = shot {
@@ -288,19 +310,31 @@ pub fn render(events: Vec<Event>, opts: Options, video: VideoOptions, storyboard
         return Err("ffmpeg failed while encoding the video".into());
     }
 
+    let mut last_blip = -1.0;
+    let mut last_howl = f32::NEG_INFINITY;
+    cues.retain(|&(at, s)| match s {
+        Sfx::Blip if at - last_blip < 0.12 => false,
+        Sfx::Howl if at - last_howl < howl_seconds => false,
+        Sfx::Blip => {
+            last_blip = at;
+            true
+        }
+        Sfx::Howl => {
+            last_howl = at;
+            true
+        }
+        _ => true,
+    });
     let mut mix = Mix::new(total + 1.0);
     if video.music.is_none() {
-        mix.music(0.0, total);
+        let ducks: Vec<(f32, f32)> = cues.iter().filter(|(_, s)| *s == Sfx::Howl).map(|&(at, _)| (at, howl_seconds)).collect();
+        mix.music(0.0, total, &ducks);
     }
-    let mut last_blip = -1.0;
     for (at, s) in cues {
-        if s == Sfx::Blip && at - last_blip < 0.12 {
-            continue;
+        match (s, &howl) {
+            (Sfx::Howl, Some(sound)) => mix.sample(at, sound, HOWL_PEAK),
+            _ => mix.sfx(at, s),
         }
-        if s == Sfx::Blip {
-            last_blip = at;
-        }
-        mix.sfx(at, s);
     }
     let wav: PathBuf = video.out.with_extension("wav");
     mix.write_wav(&wav)?;

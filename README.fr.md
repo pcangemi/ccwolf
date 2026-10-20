@@ -207,9 +207,10 @@ ureq.
 **La vidéo**
 
 La vidéo de présentation a été rendue par ccwolf lui-même : le même écran dessiné hors écran,
-rastérisé image par image avec une police à chasse fixe, envoyé à ffmpeg, avec des bruitages
-synthétisés en Rust. Compilez avec `--features video` pour avoir `--video` (polices macOS pour
-l'instant).
+rastérisé image par image avec une police à chasse fixe, envoyé à ffmpeg, avec une musique 8 bits
+et des bruitages synthétisés en Rust. Seule exception, le hurlement : un vrai loup, enregistré par
+le National Park Service américain à Denali (domaine public, voir [docs/howl.md](docs/howl.md)).
+Compilez avec `--features video` pour avoir `--video` (polices macOS pour l'instant).
 
 Les règles sont celles du jeu de société classique (Mafia, 1986, et ses variantes loup-garou),
 avec deux loups, une voyante, une sorcière et quatre villageois. ccwolf n'est affilié à aucun

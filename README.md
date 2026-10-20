@@ -197,8 +197,10 @@ About 6,000 lines of Rust in one binary, on a handful of crates: ratatui, serde 
 **The video**
 
 The promo was rendered by ccwolf itself: the same screen drawn off-screen, rasterized frame by
-frame with a monospace font, piped into ffmpeg, with sound effects synthesized in Rust. Build
-with `--features video` to get `--video` (macOS fonts for now).
+frame with a monospace font, piped into ffmpeg, with 8-bit music and sound effects synthesized in
+Rust. The one exception is the howl: a real wolf, recorded by the US National Park Service at
+Denali (public domain, see [docs/howl.md](docs/howl.md)). Build with `--features video` to get
+`--video` (macOS fonts for now).
 
 The rules are the classic party game (Mafia, 1986, and its werewolf variants), with two
 werewolves, a seer, a witch and four villagers. ccwolf is not affiliated with any publisher.

@@ -1,4 +1,5 @@
 {
+  "howl": "howl.flac",
   "shots": [
     { "card": { "title": "CCWOLF", "subtitle": "8 AIs play werewolf in a terminal.", "seconds": 3.5, "sfx": "howl" } },
     { "card": { "title": "2 WOLVES. 6 VILLAGERS.", "subtitle": "Haiku, Sonnet, Opus and Fable. The wolves have to lie.", "seconds": 3.5 } },

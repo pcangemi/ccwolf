@@ -42,6 +42,39 @@ fn envelope(t: f32, length: f32, attack: f32, release: f32) -> f32 {
     if t < 0.0 || t > length { 0.0 } else { (t / attack.max(1e-4)).min(1.0) * ((length - t) / release.max(1e-4)).min(1.0) }
 }
 
+const MELODY: [&[(i32, usize)]; 8] = [
+    &[(7, 2), (12, 2), (15, 1), (14, 1), (12, 2)],
+    &[(15, 3), (12, 1), (8, 2), (12, 2)],
+    &[(10, 2), (7, 1), (10, 1), (15, 2), (14, 1), (15, 1)],
+    &[(17, 3), (14, 1), (10, 4)],
+    &[(7, 2), (12, 2), (15, 1), (14, 1), (12, 1), (15, 1)],
+    &[(17, 2), (15, 2), (12, 2), (8, 2)],
+    &[(10, 1), (12, 1), (15, 2), (19, 2), (15, 2)],
+    &[(14, 3), (12, 1), (10, 2), (14, 2)],
+];
+
+fn melody_note(bar: usize, eighth: usize) -> Option<(i32, usize)> {
+    let mut at = 0;
+    for &(tone, length) in MELODY[bar % MELODY.len()] {
+        if at == eighth {
+            return Some((tone, length));
+        }
+        at += length;
+    }
+    None
+}
+
+const MUSIC_GAIN: f32 = 0.8;
+const DUCKED: f32 = 0.35;
+
+fn duck(t: f32, ducks: &[(f32, f32)]) -> f32 {
+    ducks.iter().fold(1.0f32, |gain, &(at, length)| {
+        let into = ((t - (at - 0.25)) / 0.25).clamp(0.0, 1.0);
+        let out = ((at + length + 0.6 - t) / 0.6).clamp(0.0, 1.0);
+        gain.min(1.0 - (1.0 - DUCKED) * into.min(out))
+    })
+}
+
 pub struct Mix {
     pub samples: Vec<f32>,
 }
@@ -61,41 +94,88 @@ impl Mix {
         }
     }
 
-    pub fn music(&mut self, from: f32, to: f32) {
-        let beat = 60.0 / 96.0;
-        let bar = beat * 4.0;
-        let chords: [[i32; 3]; 4] = [[0, 3, 7], [-4, 0, 3], [-7, -4, 0], [-5, -1, 2]];
-        let melody: [i32; 16] = [12, 15, 19, 17, 15, 14, 12, 11, 12, 15, 17, 19, 20, 19, 17, 14];
-        let fade = |t: f32| ((t - from) / 2.0).clamp(0.0, 1.0) * ((to - t) / 3.0).clamp(0.0, 1.0);
+    pub fn music(&mut self, from: f32, to: f32, ducks: &[(f32, f32)]) {
+        let mut bus = Mix { samples: vec![0.0; self.samples.len()] };
+        let eighth = 60.0 / 120.0 / 2.0;
+        let bass_roots = [-24, -28, -21, -26];
+        let stabs: [[i32; 2]; 4] = [[-9, -5], [-12, -9], [-5, -2], [-10, -7]];
+        let arps: [[i32; 3]; 4] = [[0, 3, 7], [-4, 0, 3], [3, 7, 10], [-2, 2, 5]];
         let mut t = from;
         let mut step = 0usize;
         while t < to {
-            let chord = chords[(step / 32) % 4];
-            let sixteenth = beat / 4.0;
-            let level = fade(t);
-            let root = note(chord[0] - 24);
-            if step.is_multiple_of(2) {
-                self.add(t, sixteenth * 1.8, move |x| 0.11 * level * pulse(x * root, 0.25) * envelope(x, sixteenth * 1.8, 0.004, 0.05));
+            let bar = step / 8;
+            let chord = (bar + 2) % 4;
+            let in_bar = step % 8;
+            let bass = note(bass_roots[chord] + if in_bar % 2 == 1 { 12 } else { 0 });
+            bus.add(t, eighth * 0.8, move |x| 0.17 * triangle(x * bass) * envelope(x, eighth * 0.8, 0.004, 0.04));
+            if in_bar.is_multiple_of(4) {
+                bus.add(t, 0.16, |x| 0.2 * (TAU * (120.0 - 220.0 * x) * x).sin() * envelope(x, 0.16, 0.002, 0.13));
             }
-            let arp = note(chord[step % 3] + 12);
-            self.add(t, sixteenth * 0.9, move |x| 0.05 * level * triangle(x * arp) * envelope(x, sixteenth * 0.9, 0.003, 0.04));
-            if step.is_multiple_of(8) {
-                self.add(t, 0.18, move |x| 0.22 * level * (TAU * (90.0 - 300.0 * x) * x).sin() * envelope(x, 0.18, 0.002, 0.15));
-            }
-            if step % 4 == 2 {
-                self.add(t, 0.05, move |x| 0.05 * level * (hash01((x * 40000.0) as i64, 3, 9) * 2.0 - 1.0) * envelope(x, 0.05, 0.001, 0.04));
-            }
-            if t >= from + bar * 8.0 && step.is_multiple_of(4) && (step / 4) % 8 < 7 {
-                let degree = melody[(step / 4) % 16];
-                let f = note(degree);
-                let length = beat * 0.9;
-                self.add(t, length, move |x| {
-                    let vibrato = 1.0 + 0.006 * (TAU * 5.5 * x).sin();
-                    0.06 * level * pulse(x * f * vibrato, 0.5) * envelope(x, length, 0.01, 0.2)
+            if in_bar % 4 == 2 {
+                bus.add(t, 0.13, |x| {
+                    let noise = hash01((x * 30000.0) as i64, 5, 11) * 2.0 - 1.0;
+                    (0.06 * noise + 0.05 * triangle(x * 190.0)) * (-x * 28.0).exp() * envelope(x, 0.13, 0.001, 0.05)
                 });
             }
-            t += sixteenth;
+            if in_bar % 2 == 1 {
+                bus.add(t, 0.03, |x| 0.018 * (hash01((x * 44000.0) as i64, 7, 13) * 2.0 - 1.0) * envelope(x, 0.03, 0.001, 0.025));
+                for tone in stabs[chord] {
+                    let f = note(tone);
+                    bus.add(t, 0.11, move |x| 0.022 * pulse(x * f, 0.5) * (-x * 18.0).exp() * envelope(x, 0.11, 0.003, 0.04));
+                }
+            }
+            let section = bar.checked_sub(2).map(|b| b % 12);
+            match section {
+                Some(b) if b < 8 => {
+                    if let Some((tone, eighths)) = melody_note(b, in_bar) {
+                        let f = note(tone);
+                        let length = eighth * eighths as f32 * 0.92;
+                        bus.add(t, length, move |x| {
+                            let vibrato = 1.0 + 0.005 * (TAU * 5.5 * x).sin() * ((x - 0.15) / 0.2).clamp(0.0, 1.0);
+                            0.05 * pulse(x * f * vibrato, 0.25) * envelope(x, length, 0.008, 0.06)
+                        });
+                    }
+                }
+                Some(_) => {
+                    for sixteenth in 0..2 {
+                        let f = note(arps[chord][(in_bar * 2 + sixteenth) % 3] + 12);
+                        let at = t + sixteenth as f32 * eighth / 2.0;
+                        bus.add(at, eighth * 0.45, move |x| 0.035 * triangle(x * f) * envelope(x, eighth * 0.45, 0.003, 0.03));
+                    }
+                }
+                None => {}
+            }
+            t += eighth;
             step += 1;
+        }
+        bus.soften(4200.0);
+        bus.soften(4200.0);
+        for (i, sample) in bus.samples.iter().enumerate() {
+            let t = i as f32 / RATE as f32;
+            let fade = ((t - from) / 2.0).clamp(0.0, 1.0) * ((to - t) / 3.0).clamp(0.0, 1.0);
+            self.samples[i] += sample * MUSIC_GAIN * fade * duck(t, ducks);
+        }
+    }
+
+    fn soften(&mut self, cutoff: f32) {
+        let a = 1.0 - (-TAU * cutoff / RATE as f32).exp();
+        let mut y = 0.0;
+        for s in &mut self.samples {
+            y += a * (*s - y);
+            *s = y;
+        }
+    }
+
+    pub fn sample(&mut self, at: f32, sound: &[f32], peak: f32) {
+        let loudest = sound.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        if loudest == 0.0 {
+            return;
+        }
+        let start = (at * RATE as f32) as usize;
+        for (i, s) in sound.iter().enumerate() {
+            if let Some(out) = self.samples.get_mut(start + i) {
+                *out += s / loudest * peak;
+            }
         }
     }
 
@@ -114,9 +194,9 @@ impl Mix {
             }),
             Sfx::Sting => self.add(at, 1.1, |x| {
                 let f = 330.0 * (1.0 - 0.45 * x);
-                0.24 * (pulse(x * f, 0.5) * 0.6 + pulse(x * f * 1.5, 0.5) * 0.4) * envelope(x, 1.1, 0.005, 0.5)
+                0.2 * (triangle(x * f) * 0.6 + triangle(x * f * 1.5) * 0.3 + pulse(x * f, 0.5) * 0.1) * envelope(x, 1.1, 0.005, 0.5)
             }),
-            Sfx::Blip => self.add(at, 0.09, |x| 0.08 * pulse(x * 880.0, 0.5) * envelope(x, 0.09, 0.002, 0.04)),
+            Sfx::Blip => self.add(at, 0.09, |x| 0.07 * triangle(x * 880.0) * envelope(x, 0.09, 0.002, 0.04)),
         }
     }
 
@@ -148,7 +228,7 @@ mod tests {
     #[test]
     fn the_mix_is_audible_and_never_clips_once_written() {
         let mut mix = Mix::new(12.0);
-        mix.music(0.0, 12.0);
+        mix.music(0.0, 12.0, &[]);
         for (i, sfx) in [Sfx::Howl, Sfx::Bell, Sfx::Sting, Sfx::Blip].into_iter().enumerate() {
             mix.sfx(1.0 + i as f32 * 2.0, sfx);
         }
@@ -160,5 +240,36 @@ mod tests {
         assert_eq!(&bytes[0..4], b"RIFF");
         assert_eq!(bytes.len(), 44 + mix.samples.len() * 2);
         let _ = std::fs::remove_file(path);
+    }
+
+    fn loudness(mix: &Mix, from: f32, to: f32) -> f32 {
+        let window = &mix.samples[(from * RATE as f32) as usize..(to * RATE as f32) as usize];
+        (window.iter().map(|s| s * s).sum::<f32>() / window.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn the_music_steps_back_while_the_wolf_howls() {
+        let mut plain = Mix::new(20.0);
+        plain.music(0.0, 20.0, &[]);
+        let mut ducked = Mix::new(20.0);
+        ducked.music(0.0, 20.0, &[(8.0, 4.0)]);
+        assert!(loudness(&ducked, 8.5, 11.5) < loudness(&plain, 8.5, 11.5) * 0.5);
+        assert!((loudness(&ducked, 14.0, 16.0) - loudness(&plain, 14.0, 16.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_melody_fills_every_bar_exactly() {
+        for bar in MELODY {
+            assert_eq!(bar.iter().map(|(_, length)| length).sum::<usize>(), 8);
+        }
+    }
+
+    #[test]
+    fn a_recorded_sound_lands_at_its_cue_with_the_asked_peak() {
+        let mut mix = Mix::new(2.0);
+        mix.sample(1.0, &[0.0, 0.5, -2.0, 1.0], 0.4);
+        let at = RATE as usize;
+        assert_eq!(&mix.samples[at..at + 4], &[0.0, 0.1, -0.4, 0.2]);
+        assert!(mix.samples[..at].iter().all(|s| *s == 0.0));
     }
 }
