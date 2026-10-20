@@ -5,11 +5,12 @@ edition = "2024"
 authors = ["Pierre CANGEMI"]
 description = "Werewolf in the terminal, played by Claude models: watch Haiku, Sonnet, Opus and Fable lie to each other. Retro pixel art, French and English."
 repository = "https://github.com/pcangemi/ccwolf"
+homepage = "https://github.com/pcangemi/ccwolf"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 keywords = ["claude", "werewolf", "tui", "game", "llm"]
 categories = ["games", "command-line-utilities"]
-exclude = ["docs/", ".github/"]
+exclude = ["docs/", ".github/", "dist-workspace.toml"]
 
 [dependencies]
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
@@ -27,3 +28,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[profile.dist]
+inherits = "release"
