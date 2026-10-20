@@ -209,6 +209,42 @@ fn fold(c: char) -> char {
     }
 }
 
+const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
+
+pub fn truecolor() -> bool {
+    matches!(std::env::var("COLORTERM").as_deref(), Ok("truecolor") | Ok("24bit")) || std::env::var_os("WT_SESSION").is_some()
+}
+
+pub fn indexed(r: u8, g: u8, b: u8) -> u8 {
+    let level = |v: u8| CUBE.iter().enumerate().min_by_key(|(_, l)| (**l as i32 - v as i32).abs()).map(|(i, _)| i).unwrap_or(0);
+    let (ri, gi, bi) = (level(r), level(g), level(b));
+    let distance = |(x, y, z): (u8, u8, u8)| {
+        let d = |a: u8, b: u8| (a as i32 - b as i32).pow(2);
+        d(x, r) + d(y, g) + d(z, b)
+    };
+    let cube = (CUBE[ri], CUBE[gi], CUBE[bi]);
+    let mean = (r as u32 + g as u32 + b as u32) / 3;
+    let step = ((mean as i32 - 8) / 10).clamp(0, 23) as u8;
+    let grey = 8 + step * 10;
+    if distance((grey, grey, grey)) < distance(cube) { 232 + step } else { 16 + 36 * ri as u8 + 6 * gi as u8 + bi as u8 }
+}
+
+pub fn to_256_colors(buf: &mut Buffer) {
+    let area = buf.area;
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                if let Color::Rgb(r, g, b) = cell.fg {
+                    cell.fg = Color::Indexed(indexed(r, g, b));
+                }
+                if let Color::Rgb(r, g, b) = cell.bg {
+                    cell.bg = Color::Indexed(indexed(r, g, b));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 pub fn glyph(ch: char) -> Option<[&'static str; 7]> {
     GLYPHS.iter().find(|(g, _)| *g == fold(ch)).map(|(_, rows)| *rows)
@@ -279,5 +315,20 @@ mod tests {
         let cell = buf.cell((0, 0)).unwrap();
         assert_eq!(cell.fg, Color::Rgb(255, 0, 0));
         assert_eq!(cell.bg, Color::Rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn terminals_without_24_bit_color_get_the_nearest_of_256() {
+        assert_eq!(indexed(0, 0, 0), 16);
+        assert_eq!(indexed(255, 255, 255), 231);
+        assert_eq!(indexed(255, 0, 0), 196);
+        assert_eq!(indexed(128, 128, 128), 244);
+        assert_eq!(indexed(20, 10, 20), 232);
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buf = Buffer::empty(area);
+        buf[(0, 0)].set_fg(Color::Rgb(255, 0, 0)).set_bg(Color::Reset);
+        to_256_colors(&mut buf);
+        assert_eq!(buf[(0, 0)].fg, Color::Indexed(196));
+        assert_eq!(buf[(0, 0)].bg, Color::Reset);
     }
 }

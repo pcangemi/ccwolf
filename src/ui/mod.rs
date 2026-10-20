@@ -1202,13 +1202,20 @@ fn crt(buf: &mut Buffer, area: Rect) {
 pub fn run(source: Source, opts: Options) -> io::Result<()> {
     let mut app = App::new(source, opts);
     let mut terminal = ratatui::try_init()?;
+    let truecolor = canvas::truecolor();
     let mut last = Instant::now();
     let result = loop {
         let now = Instant::now();
         let dt = (now - last).as_secs_f32().min(0.2);
         last = now;
         app.tick(dt);
-        if let Err(e) = terminal.draw(|f| app.draw(f)) {
+        let drawn = terminal.draw(|f| {
+            app.draw(f);
+            if !truecolor {
+                canvas::to_256_colors(f.buffer_mut());
+            }
+        });
+        if let Err(e) = drawn {
             break Err(e);
         }
         match event::poll(Duration::from_millis(30)) {
