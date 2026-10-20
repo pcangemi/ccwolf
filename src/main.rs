@@ -1,5 +1,6 @@
 mod claude;
 mod game;
+mod human;
 mod jev;
 mod lang;
 mod model;
@@ -28,6 +29,8 @@ const HELP: &str = "ccwolf: werewolf in the terminal, played by Claude models
 USAGE
   ccwolf                     watch 8 Claude models play (needs ANTHROPIC_API_KEY;
                              with TYPESAFE_API_KEY, Jev scores every speech as a lie detector)
+  ccwolf --play              take a seat yourself: you get a character and a secret role,
+                             and try to win against seven Claude models
   ccwolf --demo              watch a recorded game, no API key needed
   ccwolf --replay FILE       watch one of your recorded games again
   ccwolf stats [DIR]         who lies best: results by model over your recorded games
@@ -73,6 +76,7 @@ struct Args {
     judge: Vec<PathBuf>,
     force: bool,
     video: Option<PathBuf>,
+    play: bool,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -95,6 +99,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         judge: Vec::new(),
         force: false,
         video: None,
+        play: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -118,6 +123,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--no-crt" => args.crt = false,
             "--video" => args.video = Some(PathBuf::from(value("--video")?)),
             "--demo" => args.demo = true,
+            "--play" => args.play = true,
             "--headless" => args.headless = true,
             "--scripted" => args.scripted = true,
             "--no-jev" => args.jev = false,
@@ -256,7 +262,7 @@ fn screen_error(e: std::io::Error) -> String {
 fn watch(args: Args) -> Result<(), String> {
     let judge = judge(&args);
     let jev = judge.is_some();
-    let options = |lang: Lang, replay: bool| ui::Options { lang, crt: args.crt, speed: args.speed, lineup: args.lineup.clone(), replay, jev };
+    let options = |lang: Lang, replay: bool| ui::Options { lang, crt: args.crt, speed: args.speed, lineup: args.lineup.clone(), replay, jev, human: None };
     if args.demo || args.replay.is_some() {
         let events = match &args.replay {
             Some(path) => record::load(path)?,
@@ -275,8 +281,18 @@ fn watch(args: Args) -> Result<(), String> {
         return ui::run(ui::Source::Replay(events), options(lang, true)).map_err(screen_error);
     }
     let seed = args.seed.unwrap_or_else(rng::seed_from_clock);
-    let players = deal(seed, args.lang, &args.lineup);
-    let agents = agents(&args, seed, &players)?;
+    let mut players = deal(seed, args.lang, &args.lineup);
+    let me = args.play.then(|| rng::Rng::new(seed ^ 0xBEEF).below(players.len()));
+    if let Some(me) = me {
+        players[me].model = Model::Human;
+    }
+    let mut agents = agents(&args, seed, &players)?;
+    let mut seat = None;
+    if let Some(me) = me {
+        let (agent, link) = human::pair(me);
+        agents[me] = Box::new(agent);
+        seat = Some(link);
+    }
     let mut recorder = recorder(&args, seed)?;
     let path = recorder.as_ref().map(|r| r.path().to_path_buf());
     let lang = args.lang;
@@ -288,7 +304,9 @@ fn watch(args: Args) -> Result<(), String> {
             let _ = tx.send(e.clone());
         });
     });
-    ui::run(ui::Source::Live(launch), options(lang, false)).map_err(screen_error)?;
+    let mut opts = options(lang, false);
+    opts.human = seat;
+    ui::run(ui::Source::Live(launch), opts).map_err(screen_error)?;
     if let Some(path) = path {
         println!("ccwolf --replay {}", path.display());
     }

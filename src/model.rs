@@ -7,6 +7,7 @@ pub enum Model {
     Sonnet,
     Opus,
     Fable,
+    Human,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -35,6 +36,7 @@ impl Model {
             Model::Sonnet => "claude-sonnet-5-5",
             Model::Opus => "claude-opus-5-5",
             Model::Fable => "claude-fable-5-1",
+            Model::Human => "human",
         }
     }
 
@@ -44,6 +46,7 @@ impl Model {
             Model::Sonnet => "Sonnet 5.5",
             Model::Opus => "Opus 5.5",
             Model::Fable => "Fable 5.1",
+            Model::Human => "Human",
         }
     }
 
@@ -53,6 +56,7 @@ impl Model {
             Model::Sonnet => (112, 172, 255),
             Model::Opus => (196, 140, 255),
             Model::Fable => (255, 198, 92),
+            Model::Human => (255, 255, 255),
         }
     }
 
@@ -72,6 +76,7 @@ impl Model {
             Model::Sonnet => [2.0, 2.50, 0.10, 10.0],
             Model::Opus => [4.0, 5.0, 0.20, 20.0],
             Model::Fable => [10.0, 12.50, 0.25, 50.0],
+            Model::Human => [0.0, 0.0, 0.0, 0.0],
         }
     }
 

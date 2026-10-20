@@ -31,7 +31,7 @@ pub struct Scene<'a> {
     pub speaker: Option<usize>,
     pub thinking: Option<usize>,
     pub mark: Option<(usize, Rgb)>,
-    pub show_roles: bool,
+    pub unmasked: Vec<bool>,
     pub banner: Option<(String, f32)>,
     pub flash: Option<(Rgb, f32)>,
 }
@@ -228,7 +228,7 @@ impl Scene<'_> {
         let speaking = self.speaker == Some(i);
         let bob = if speaking && (self.t * 9.0).sin() > 0.0 { 1 } else { 0 };
         let (x0, y0) = (foot_x.round() as i32 - 3, foot_y.round() as i32 - 12 - bob);
-        let wolf_form = self.show_roles && seat.role == Role::Wolf && self.night > 0.6;
+        let wolf_form = self.unmasked.get(i).copied().unwrap_or(false) && seat.role == Role::Wolf && self.night > 0.6;
         let tint = Rgb::from(seat.model.rgb());
         let shade = 1.0 - self.night * 0.45;
         let hair = Rgb::hex(HAIR[i % HAIR.len()]).scale(shade);

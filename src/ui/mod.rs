@@ -1,4 +1,5 @@
 pub mod canvas;
+pub mod player;
 pub mod scene;
 #[cfg(feature = "video")]
 pub mod video;
@@ -10,16 +11,18 @@ use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{self, Event as Input, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, Event as TermEvent, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
-use crate::game::{Event, PlayerInfo, Role, Team, Verdict};
+use crate::game::{Action, Audience, Event, PlayerInfo, Role, Task, Team, Verdict};
+use crate::human;
 use crate::lang::{Lang, Ui};
 use crate::model::Model;
 use canvas::{Rgb, label};
+use player::{Input, Outcome};
 use scene::{Scene, Seat};
 
 const CPS: f32 = 38.0;
@@ -47,6 +50,7 @@ pub struct Options {
     pub lineup: Vec<Model>,
     pub replay: bool,
     pub jev: bool,
+    pub human: Option<human::Seat>,
 }
 
 fn role_color(role: Role) -> Rgb {
@@ -127,6 +131,14 @@ struct App {
     lineup: Vec<Model>,
     jev: bool,
     quit: bool,
+    me: Option<usize>,
+    seat: Option<human::Seat>,
+    pending: Option<Task>,
+    input: Option<Input>,
+    intro: bool,
+    visions: Vec<(usize, bool)>,
+    potions: (bool, bool),
+    my_lies: Vec<f32>,
 }
 
 impl App {
@@ -169,6 +181,14 @@ impl App {
             lineup: opts.lineup,
             jev: opts.jev,
             quit: false,
+            me: opts.human.as_ref().map(|h| h.seat),
+            intro: opts.human.is_some(),
+            seat: opts.human,
+            pending: None,
+            input: None,
+            visions: Vec::new(),
+            potions: (true, true),
+            my_lies: Vec::new(),
         }
     }
 
@@ -192,12 +212,62 @@ impl App {
         self.rx = Some(rx);
         self.stage = Stage::Game;
         self.clock = 0.0;
+        if self.me.is_some() {
+            self.night = 1.0;
+            self.night_target = 1.0;
+        }
     }
 
     fn pump(&mut self) {
         if let Some(rx) = &self.rx {
             while let Ok(e) = rx.try_recv() {
                 self.queue.push_back(e);
+            }
+        }
+    }
+
+    fn sees_all(&self) -> bool {
+        match self.me {
+            None => true,
+            Some(me) => self.winner.is_some() || self.aborted.is_some() || !self.alive.get(me).copied().unwrap_or(true),
+        }
+    }
+
+    fn role_visible(&self, p: usize) -> bool {
+        if self.sees_all() {
+            return self.show_roles || !self.alive.get(p).copied().unwrap_or(true);
+        }
+        let me = self.me.unwrap_or(usize::MAX);
+        let both_wolves = self.players.get(me).is_some_and(|m| m.role == Role::Wolf) && self.players[p].role == Role::Wolf;
+        p == me || both_wolves || !self.alive.get(p).copied().unwrap_or(true)
+    }
+
+    fn model_label(&self, model: Model) -> &'static str {
+        if model == Model::Human { self.ui.you } else { model.label() }
+    }
+
+    fn answer(&mut self, action: Action) {
+        if let Some(seat) = &self.seat {
+            let _ = seat.answers.send(action);
+        }
+        self.pending = None;
+        self.input = None;
+    }
+
+    fn poll_player(&mut self) {
+        if let Some(seat) = &self.seat {
+            while let Ok(request) = seat.requests.try_recv() {
+                self.pending = Some(request.task);
+            }
+        }
+        let ready = self.show.is_none() && self.queue.is_empty() && !self.intro && self.input.is_none();
+        if let (true, Some(task)) = (ready, self.pending.clone()) {
+            match Input::from_task(&task) {
+                Ok(input) => {
+                    self.input = Some(input);
+                    self.thinking = None;
+                }
+                Err(action) => self.answer(action),
             }
         }
     }
@@ -249,6 +319,29 @@ impl App {
     fn begin(&mut self, e: Event) -> f32 {
         let ui = self.ui;
         let fr = self.lang == Lang::Fr;
+        if let Some(me) = self.me {
+            match &e {
+                Event::SeerLook { player, target, wolf, .. } if *player == me => self.visions.push((*target, *wolf)),
+                Event::Witch { player, save, poison, .. } if *player == me => {
+                    self.potions.0 &= !*save;
+                    self.potions.1 &= poison.is_none();
+                }
+                Event::Speech { player, verdict: Some(v), .. } if *player == me => self.my_lies.push(v.lie),
+                _ => {}
+            }
+            let secret = matches!(e.audience(), Audience::Wolves | Audience::Only(_));
+            if secret && !self.players.is_empty() && !self.sees_all() && !e.visible_to(me, &self.players) {
+                return 0.0;
+            }
+            let dies = match &e {
+                Event::Dawn { deaths, .. } => deaths.contains(&me),
+                Event::Verdict { eliminated, .. } => *eliminated == Some(me),
+                _ => false,
+            };
+            if dies {
+                self.log(ui.now_spectator.to_string(), THOUGHT);
+            }
+        }
         match e {
             Event::Setup { players, .. } => {
                 self.alive = vec![true; players.len()];
@@ -353,6 +446,13 @@ impl App {
                 self.log(format!("{} : {}", self.name(player), say), Rgb::from(self.players[player].model.rgb()).mix(TEXT, 0.4));
                 let title = format!("{} {}", ui.village_square, if round == 2 { "· 2" } else { "" });
                 let dur = self.open_panel(title.trim_end(), Some(player), say, thought, Rgb::from(self.players[player].model.rgb()));
+                if Some(player) == self.me {
+                    if let Some(p) = &mut self.panel {
+                        p.start -= 1000.0;
+                    }
+                    return 1.5;
+                }
+                let verdict = if self.sees_all() { verdict } else { None };
                 self.attach(verdict, dur)
             }
             Event::Vote { player, target, thought } => {
@@ -397,6 +497,7 @@ impl App {
                 self.speaker = Some(player);
                 self.log(format!("{} : {}", self.name(player), say), DIM);
                 let dur = self.open_panel(ui.last_words, Some(player), say, thought, Rgb(200.0, 200.0, 210.0));
+                let verdict = if self.sees_all() { verdict } else { None };
                 self.attach(verdict, dur)
             }
             Event::Thinking { player } => {
@@ -464,18 +565,39 @@ impl App {
 
     fn tick(&mut self, dt: f32) {
         self.anim += dt;
-        if !self.paused && self.stage == Stage::Game {
+        if !self.paused && !self.intro && self.stage == Stage::Game {
             self.clock += dt * self.speed;
         }
         let step = (dt * self.speed.max(0.5) * 0.9).min(1.0);
         self.night += (self.night_target - self.night) * step;
         self.pump();
-        if !self.paused {
+        if !self.paused && (!self.intro || self.players.is_empty()) {
             self.advance();
         }
+        self.poll_player();
     }
 
     fn key(&mut self, code: KeyCode) {
+        if self.stage == Stage::Game && self.intro {
+            match code {
+                KeyCode::Enter | KeyCode::Char(' ') => self.intro = false,
+                KeyCode::Esc => self.quit = true,
+                _ => {}
+            }
+            return;
+        }
+        if let Some(input) = &mut self.input {
+            if code == KeyCode::Esc {
+                self.quit = true;
+                return;
+            }
+            match input.key(code) {
+                Outcome::Waiting => {}
+                Outcome::Next(next) => self.input = Some(next),
+                Outcome::Done(action) => self.answer(action),
+            }
+            return;
+        }
         match (&self.stage, code) {
             (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => self.quit = true,
             (Stage::Title, KeyCode::Enter) | (Stage::Title, KeyCode::Char(' ')) => self.start(),
@@ -522,7 +644,10 @@ impl App {
                 line.push_str(&format!(" {n} x {}", model.label()));
             }
         }
-        if !self.replay {
+        if self.me.is_some() {
+            let text = format!("{} : {}", self.ui.lineup_hint, self.ui.play_lineup);
+            label(buf, center(&text), below + 3, &text, GOLD, true, area);
+        } else if !self.replay {
             let mut x = center(&line);
             let head = format!("{} :", self.ui.lineup_hint);
             label(buf, x, below + 3, &head, DIM, false, area);
@@ -585,20 +710,16 @@ impl App {
         } else {
             scene_area
         };
-        let scene = Scene {
-            seats: &seats,
-            night: self.night,
-            day: self.day,
-            t: self.anim,
-            speaker: self.speaker,
-            thinking: self.thinking,
-            mark: self.mark,
-            show_roles: self.show_roles,
-            banner,
-            flash,
+        let unmasked: Vec<bool> = (0..self.players.len()).map(|i| self.role_visible(i)).collect();
+        let banner = if self.intro { self.me.and_then(|me| self.players.get(me)).map(|p| (self.ui.role(p.role).to_uppercase(), 1.0)) } else { banner };
+        let mark = match &self.input {
+            Some(input) => input.highlighted().map(|p| (p, GOLD)),
+            None => self.mark,
         };
+        let speaker = if self.input.is_some() { self.me } else { self.speaker };
+        let scene = Scene { seats: &seats, night: self.night, day: self.day, t: self.anim, speaker, thinking: self.thinking, mark, unmasked, banner, flash };
         scene.draw(shaken, f.buffer_mut());
-        if let Some(p) = self.thinking {
+        if let Some(p) = self.thinking.filter(|p| Some(*p) != self.me) {
             let text = format!("{} {}...", self.name(p), self.ui.thinking);
             label(f.buffer_mut(), scene_area.x as i32 + 2, scene_area.bottom() as i32 - 1, &text, DIM.mix(TEXT, 0.4), false, scene_area);
         }
@@ -615,7 +736,111 @@ impl App {
         self.draw_roster(f, roster_area);
         if self.winner.is_some() || self.aborted.is_some() {
             self.draw_recap(f, scene_area);
+        } else if self.intro {
+            self.draw_intro(f, scene_area);
         }
+    }
+
+    fn role_card(&self) -> Vec<Line<'static>> {
+        let Some(me) = self.me else { return Vec::new() };
+        let Some(info) = self.players.get(me) else { return Vec::new() };
+        let role_index = match info.role {
+            Role::Wolf => 0,
+            Role::Seer => 1,
+            Role::Witch => 2,
+            Role::Villager => 3,
+        };
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(format!("{} {}, ", self.ui.you_are, info.name), fg(TEXT).add_modifier(Modifier::BOLD)),
+                Span::styled(info.persona.clone(), fg(DIM)),
+            ]),
+            Line::from(Span::styled(self.ui.role(info.role).to_uppercase(), fg(role_color(info.role)).add_modifier(Modifier::BOLD))),
+            Line::from(Span::styled(self.ui.role_help[role_index], fg(TEXT))),
+        ];
+        match info.role {
+            Role::Wolf => {
+                let pack: Vec<String> = (0..self.players.len()).filter(|&p| p != me && self.players[p].role == Role::Wolf).map(|p| self.name(p)).collect();
+                lines.push(Line::from(Span::styled(format!("{} : {}", self.ui.pack, pack.join(", ")), fg(WOLF_RED))));
+            }
+            Role::Seer if !self.visions.is_empty() => {
+                let seen: Vec<String> =
+                    self.visions.iter().map(|(p, wolf)| format!("{} {}", self.name(*p), if *wolf { "\u{2620}" } else { "\u{2713}" })).collect();
+                lines.push(Line::from(Span::styled(format!("{} : {}", self.ui.visions, seen.join("  ")), fg(SEER_VIOLET))));
+            }
+            Role::Witch => {
+                let left = format!(
+                    "{} : {} {}",
+                    self.ui.potions_left,
+                    if self.potions.0 { "\u{2665}" } else { "\u{00b7}" },
+                    if self.potions.1 { "\u{2620}" } else { "\u{00b7}" }
+                );
+                lines.push(Line::from(Span::styled(left, fg(WITCH_GREEN))));
+            }
+            _ => {}
+        }
+        lines
+    }
+
+    fn draw_intro(&self, f: &mut Frame, scene: Rect) {
+        let w = 76.min(scene.width.saturating_sub(4));
+        let h = 9.min(scene.height.saturating_sub(2));
+        let area = Rect::new(scene.x + (scene.width - w) / 2, scene.y + scene.height.saturating_sub(h) * 2 / 3, w, h);
+        f.render_widget(Clear, area);
+        let accent = self.me.and_then(|me| self.players.get(me)).map(|p| role_color(p.role)).unwrap_or(GOLD);
+        let block = Block::bordered()
+            .border_type(BorderType::Double)
+            .border_style(fg(accent))
+            .title(Span::styled(format!(" {} ", self.ui.your_role), fg(accent).add_modifier(Modifier::BOLD)))
+            .title_alignment(Alignment::Center)
+            .style(Style::new().bg(Rgb(8.0, 8.0, 16.0).color()));
+        let mut lines = self.role_card();
+        lines.push(Line::from(""));
+        if (self.anim * 1.6).sin() > -0.3 {
+            lines.push(Line::from(Span::styled(self.ui.start_hint, fg(GOLD).add_modifier(Modifier::BOLD))));
+        }
+        f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: true }), area);
+    }
+
+    fn draw_input(&self, f: &mut Frame, area: Rect, input: &Input) {
+        let victim = match input {
+            Input::Save { victim, .. } => self.name(*victim),
+            _ => String::new(),
+        };
+        let block = Block::bordered()
+            .border_type(BorderType::Double)
+            .border_style(fg(GOLD))
+            .title(Span::styled(format!(" {} ", input.title(self.lang, &victim)), fg(GOLD).add_modifier(Modifier::BOLD)))
+            .title_bottom(Line::from(Span::styled(format!(" {} ", input.hint(self.lang)), fg(DIM))).alignment(Alignment::Right))
+            .style(Style::new().bg(PANEL.color()));
+        let inner = block.inner(area);
+        let lines: Vec<Line> = match input {
+            Input::Speech { buffer, .. } => {
+                let cursor = if (self.anim * 3.0) as i32 % 2 == 0 { "\u{2588}" } else { " " };
+                let wrapped = wrap(&format!("{buffer}{cursor}"), inner.width as usize);
+                let skip = wrapped.len().saturating_sub(inner.height as usize);
+                wrapped.into_iter().skip(skip).map(|l| Line::from(Span::styled(l, fg(TEXT)))).collect()
+            }
+            Input::Pick { options, index, .. } | Input::Poison { options, index, .. } => {
+                let mut spans = Vec::new();
+                for (i, p) in options.iter().enumerate() {
+                    let name = if *p == player::NOBODY { crate::prompts::nobody(self.lang).to_string() } else { self.name(*p) };
+                    let style = if i == *index { Style::new().fg(BG.color()).bg(GOLD.color()).add_modifier(Modifier::BOLD) } else { fg(TEXT) };
+                    spans.push(Span::styled(format!(" {name} "), style));
+                    spans.push(Span::raw("  "));
+                }
+                vec![Line::from(""), Line::from(spans)]
+            }
+            Input::Save { index, .. } => {
+                let (yes, no) = if self.lang == Lang::Fr { ("Oui, la sauver", "Non") } else { ("Yes, save them", "No") };
+                let pick = |i: usize, text: &str| {
+                    let style = if i == *index { Style::new().fg(BG.color()).bg(GOLD.color()).add_modifier(Modifier::BOLD) } else { fg(TEXT) };
+                    Span::styled(format!(" {text} "), style)
+                };
+                vec![Line::from(""), Line::from(vec![pick(0, yes), Span::raw("    "), pick(1, no)])]
+            }
+        };
+        f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
     }
 
     fn draw_top(&self, f: &mut Frame, area: Rect) {
@@ -674,6 +899,21 @@ impl App {
     }
 
     fn draw_panels(&self, f: &mut Frame, speech_area: Rect, thought_area: Rect) {
+        if !self.sees_all() {
+            let block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(fg(THOUGHT.scale(0.7)))
+                .title(Span::styled(format!(" {} ", self.ui.your_role), fg(THOUGHT).add_modifier(Modifier::BOLD)))
+                .style(Style::new().bg(PANEL.color()));
+            f.render_widget(Paragraph::new(self.role_card()).block(block).wrap(Wrap { trim: true }), thought_area);
+        }
+        if let Some(input) = &self.input {
+            self.draw_input(f, speech_area, input);
+            if self.sees_all() {
+                f.render_widget(Block::bordered().border_type(BorderType::Rounded).style(Style::new().bg(PANEL.color())), thought_area);
+            }
+            return;
+        }
         let (title, accent) = match &self.panel {
             Some(p) => (p.title.clone(), p.accent),
             None => (self.ui.village_square.to_string(), DIM),
@@ -693,7 +933,9 @@ impl App {
             .style(Style::new().bg(PANEL.color()));
         let Some(p) = &self.panel else {
             f.render_widget(block, speech_area);
-            f.render_widget(thought_block, thought_area);
+            if self.sees_all() {
+                f.render_widget(thought_block, thought_area);
+            }
             return;
         };
         let typed = ((self.clock - p.start) * CPS).max(0.0) as usize;
@@ -703,10 +945,10 @@ impl App {
             let info = &self.players[w];
             let mut head = vec![
                 Span::styled(info.name.clone(), fg(Rgb::from(info.model.rgb())).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("  {}", info.model.label()), fg(Rgb::from(info.model.rgb()).scale(0.75))),
+                Span::styled(format!("  {}", self.model_label(info.model)), fg(Rgb::from(info.model.rgb()).scale(0.75))),
                 Span::styled(format!("  ·  {}", info.persona), fg(DIM)),
             ];
-            if self.show_roles {
+            if self.role_visible(w) {
                 head.push(Span::styled(format!("  [{}]", self.ui.role(info.role)), fg(role_color(info.role)).add_modifier(Modifier::BOLD)));
             }
             lines.push(Line::from(head));
@@ -739,6 +981,9 @@ impl App {
             lines.push(Line::from(vec![Span::styled(text, fg(TEXT)), Span::styled(tail, fg(accent))]));
         }
         f.render_widget(Paragraph::new(lines).block(block), speech_area);
+        if !self.sees_all() {
+            return;
+        }
 
         let inner = thought_block.inner(thought_area);
         let body: Vec<Line> = if self.show_thoughts {
@@ -789,9 +1034,9 @@ impl App {
                 let mut spans = vec![
                     Span::styled("\u{25cf} ", fg(Rgb::from(p.model.rgb()))),
                     Span::styled(format!("{:<8}", p.name), name_style),
-                    Span::styled(format!("{:<11}", p.model.label()), fg(Rgb::from(p.model.rgb()).scale(if alive { 0.9 } else { 0.5 }))),
+                    Span::styled(format!("{:<11}", self.model_label(p.model)), fg(Rgb::from(p.model.rgb()).scale(if alive { 0.9 } else { 0.5 }))),
                 ];
-                if self.show_roles || !alive {
+                if self.role_visible(i) {
                     spans.push(Span::styled(format!("{:<11}", self.ui.role(p.role)), fg(role_color(p.role).scale(if alive { 1.0 } else { 0.6 }))));
                 } else {
                     spans.push(Span::styled(format!("{:<11}", "?"), fg(DIM)));
@@ -808,10 +1053,15 @@ impl App {
 
     fn draw_recap(&self, f: &mut Frame, scene: Rect) {
         let w = 64.min(scene.width.saturating_sub(4));
-        let h = (self.players.len() as u16 + 6).min(scene.height.saturating_sub(2));
+        let h = (self.players.len() as u16 + 7).min(scene.height.saturating_sub(2));
         let area = Rect::new(scene.x + (scene.width - w) / 2, scene.y + scene.height.saturating_sub(h) / 2 + 2, w, h);
         f.render_widget(Clear, area);
+        let mine = self.me.and_then(|me| self.players.get(me)).map(|p| p.role == Role::Wolf);
         let (title, color) = match (self.winner, &self.aborted) {
+            (Some(team), _) if mine.is_some() => {
+                let won = (team == Team::Wolves) == mine.unwrap_or(false);
+                (format!("{} · {}", if won { self.ui.you_win } else { self.ui.you_lose }, self.ui.winner(team)), if won { GOLD } else { WOLF_RED })
+            }
             (Some(team), _) => (self.ui.winner(team).to_string(), if team == Team::Wolves { WOLF_RED } else { Rgb(255.0, 214.0, 120.0) }),
             (None, Some(_)) => (self.ui.aborted.to_string(), WOLF_RED),
             (None, None) => (String::new(), TEXT),
@@ -831,10 +1081,16 @@ impl App {
             lines.push(Line::from(vec![
                 Span::styled("\u{25cf} ", fg(Rgb::from(p.model.rgb()))),
                 Span::styled(format!("{:<9}", p.name), fg(TEXT).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:<12}", p.model.label()), fg(Rgb::from(p.model.rgb()))),
+                Span::styled(format!("{:<12}", self.model_label(p.model)), fg(Rgb::from(p.model.rgb()))),
                 Span::styled(format!("{:<13}", self.ui.role(p.role)), fg(role_color(p.role))),
                 Span::styled(if alive { self.ui.survived } else { self.ui.dead }, fg(if alive { WITCH_GREEN } else { DIM })),
             ]));
+        }
+        if !self.my_lies.is_empty() {
+            let mean = self.my_lies.iter().sum::<f32>() / self.my_lies.len() as f32;
+            let pct = (mean * 100.0).round();
+            let text = if self.lang == Lang::Fr { format!("{} {pct}\u{a0}%", self.ui.your_lies) } else { format!("{} {pct}%", self.ui.your_lies) };
+            lines.push(Line::from(Span::styled(text, fg(Rgb(255.0, 150.0, 60.0)))));
         }
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
@@ -916,7 +1172,7 @@ pub fn run(source: Source, opts: Options) -> io::Result<()> {
         }
         match event::poll(Duration::from_millis(30)) {
             Ok(true) => {
-                if let Ok(Input::Key(k)) = event::read()
+                if let Ok(TermEvent::Key(k)) = event::read()
                     && k.kind == KeyEventKind::Press
                 {
                     if k.modifiers.contains(KeyModifiers::CONTROL) && k.code == KeyCode::Char('c') {
@@ -967,7 +1223,7 @@ mod tests {
     #[test]
     fn a_whole_game_plays_through_the_screen_without_panicking() {
         for lang in [Lang::Fr, Lang::En] {
-            let opts = Options { lang, crt: true, speed: 1.0, lineup: lineup("mixed").unwrap(), replay: true, jev: false };
+            let opts = Options { lang, crt: true, speed: 1.0, lineup: lineup("mixed").unwrap(), replay: true, jev: false, human: None };
             let mut app = App::new(Source::Replay(recorded(lang)), opts);
             let mut terminal = Terminal::new(TestBackend::new(140, 44)).unwrap();
             terminal.draw(|f| app.draw(f)).unwrap();
@@ -1047,7 +1303,7 @@ mod tests {
         let Ok(dir) = std::env::var("CCWOLF_SNAPSHOTS") else { return };
         let dir = std::path::PathBuf::from(dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let opts = Options { lang: Lang::Fr, crt: true, speed: 1.0, lineup: lineup("mixed").unwrap(), replay: false, jev: true };
+        let opts = Options { lang: Lang::Fr, crt: true, speed: 1.0, lineup: lineup("mixed").unwrap(), replay: false, jev: true, human: None };
         let events = match std::env::var("CCWOLF_SNAPSHOT_REPLAY") {
             Ok(path) => crate::record::load(std::path::Path::new(&path)).unwrap(),
             Err(_) => recorded(Lang::Fr),
@@ -1080,5 +1336,81 @@ mod tests {
             assert!(lines.iter().all(|l| l.chars().count() <= width), "{width}: {lines:?}");
             assert_eq!(lines.join(" ").split_whitespace().collect::<String>(), text.split_whitespace().collect::<String>());
         }
+    }
+
+    #[test]
+    fn a_human_plays_a_whole_game_from_the_keyboard_and_only_sees_their_share() {
+        let seed = 8;
+        let mut players = deal(seed, Lang::Fr, &lineup("mixed").unwrap());
+        let me = players.iter().position(|p| p.role == Role::Villager).unwrap();
+        players[me].model = Model::Human;
+        let wolves: Vec<String> = players.iter().filter(|p| p.role == Role::Wolf).map(|p| p.name.clone()).collect();
+        let mut agents: Vec<Box<dyn Agent>> = (0..SEATS).map(|i| Box::new(ScriptedAgent::new(seed, i)) as Box<dyn Agent>).collect();
+        let (agent, link) = human::pair(me);
+        agents[me] = Box::new(agent);
+        let table = players.clone();
+        let launch: Launch = Box::new(move |tx| {
+            Engine::new(seed, Lang::Fr, table, agents).run(&mut |e: &Event| {
+                let _ = tx.send(e.clone());
+            });
+        });
+        let opts = Options { lang: Lang::Fr, crt: false, speed: 1.0, lineup: lineup("mixed").unwrap(), replay: false, jev: false, human: Some(link) };
+        let mut app = App::new(Source::Live(launch), opts);
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+        let shots = std::env::var("CCWOLF_SNAPSHOTS").ok().map(std::path::PathBuf::from);
+        app.key(KeyCode::Enter);
+        assert!(app.intro);
+        for _ in 0..5 {
+            app.tick(0.05);
+        }
+        terminal.draw(|f| app.draw(f)).unwrap();
+        if let Some(dir) = &shots {
+            std::fs::create_dir_all(dir).unwrap();
+            snapshot(terminal.backend().buffer(), &dir.join("p0-intro.ppm"));
+        }
+        app.key(KeyCode::Enter);
+        let mut answered = 0;
+        for _ in 0..60000 {
+            app.tick(0.05);
+            app.skip();
+            if let Some(input) = app.input.clone() {
+                if let (Some(dir), true) = (&shots, answered < 4) {
+                    app.key(KeyCode::Right);
+                    if matches!(input, Input::Speech { .. }) {
+                        for c in "Moi, je n'ai rien vu".chars() {
+                            app.key(KeyCode::Char(c));
+                        }
+                    }
+                    terminal.draw(|f| app.draw(f)).unwrap();
+                    snapshot(terminal.backend().buffer(), &dir.join(format!("p{}-input.ppm", answered + 1)));
+                    if let Some(Input::Speech { buffer, .. }) = &mut app.input {
+                        buffer.clear();
+                    }
+                }
+                if matches!(input, Input::Speech { .. }) {
+                    for c in "je suis innocent".chars() {
+                        app.key(KeyCode::Char(c));
+                    }
+                }
+                app.key(KeyCode::Right);
+                app.key(KeyCode::Enter);
+                answered += 1;
+            }
+            terminal.draw(|f| app.draw(f)).unwrap();
+            if !app.sees_all() {
+                let screen: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+                assert!(!screen.contains("veut dévorer") && !screen.contains("CONCILIABULE"), "a villager saw the wolves' night");
+                for w in &wolves {
+                    let i = app.players.iter().position(|p| &p.name == w).unwrap();
+                    assert!(!app.role_visible(i) || !app.alive[i], "a living wolf was unmasked");
+                }
+            }
+            if app.winner.is_some() {
+                break;
+            }
+        }
+        assert!(app.winner.is_some(), "the game should end");
+        assert!(answered > 0, "the player should have been asked to act");
+        assert!(app.sees_all());
     }
 }
