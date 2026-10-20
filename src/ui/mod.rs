@@ -135,6 +135,7 @@ struct App {
     lineup: Vec<Model>,
     jev: bool,
     quit: bool,
+    confirm_quit: bool,
     me: Option<usize>,
     seat: Option<human::Seat>,
     pending: Option<Task>,
@@ -185,6 +186,7 @@ impl App {
             lineup: opts.lineup,
             jev: opts.jev,
             quit: false,
+            confirm_quit: false,
             me: opts.human.as_ref().map(|h| h.seat),
             intro: opts.human.is_some(),
             seat: opts.human,
@@ -234,6 +236,15 @@ impl App {
         match self.me {
             None => true,
             Some(me) => self.winner.is_some() || self.aborted.is_some() || !self.alive.get(me).copied().unwrap_or(true),
+        }
+    }
+
+    fn leave(&mut self) {
+        let at_stake = self.me.is_some() && self.stage == Stage::Game && self.winner.is_none() && self.aborted.is_none();
+        if at_stake {
+            self.confirm_quit = true;
+        } else {
+            self.quit = true;
         }
     }
 
@@ -582,17 +593,24 @@ impl App {
     }
 
     fn key(&mut self, code: KeyCode) {
+        if self.confirm_quit {
+            match code {
+                KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('o') | KeyCode::Char('y') => self.quit = true,
+                _ => self.confirm_quit = false,
+            }
+            return;
+        }
         if self.stage == Stage::Game && self.intro {
             match code {
                 KeyCode::Enter | KeyCode::Char(' ') => self.intro = false,
-                KeyCode::Esc => self.quit = true,
+                KeyCode::Esc => self.leave(),
                 _ => {}
             }
             return;
         }
         if let Some(input) = &mut self.input {
             if code == KeyCode::Esc {
-                self.quit = true;
+                self.leave();
                 return;
             }
             match input.key(code) {
@@ -603,7 +621,7 @@ impl App {
             return;
         }
         match (&self.stage, code) {
-            (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => self.quit = true,
+            (_, KeyCode::Char('q')) | (_, KeyCode::Esc) => self.leave(),
             (Stage::Title, KeyCode::Enter) | (Stage::Title, KeyCode::Char(' ')) => self.start(),
             (Stage::Game, KeyCode::Char(' ')) => self.paused = !self.paused,
             (Stage::Game, KeyCode::Right) | (Stage::Game, KeyCode::Enter) => self.skip(),
@@ -743,6 +761,24 @@ impl App {
         } else if self.intro {
             self.draw_intro(f, scene_area);
         }
+        if self.confirm_quit {
+            self.draw_quit(f, scene_area);
+        }
+    }
+
+    fn draw_quit(&self, f: &mut Frame, scene: Rect) {
+        let w = 50.min(scene.width.saturating_sub(4));
+        let h = 4.min(scene.height);
+        let area = Rect::new(scene.x + (scene.width - w) / 2, scene.y + scene.height.saturating_sub(h) / 2, w, h);
+        f.render_widget(Clear, area);
+        let block = Block::bordered()
+            .border_type(BorderType::Double)
+            .border_style(fg(GOLD))
+            .title(Span::styled(format!(" {} ", self.ui.quit_question), fg(GOLD).add_modifier(Modifier::BOLD)))
+            .title_alignment(Alignment::Center)
+            .style(Style::new().bg(Rgb(8.0, 8.0, 16.0).color()));
+        let lines = vec![Line::from(""), Line::from(Span::styled(self.ui.quit_hint, fg(TEXT)))];
+        f.render_widget(Paragraph::new(lines).alignment(Alignment::Center).block(block), area);
     }
 
     fn role_card(&self) -> Vec<Line<'static>> {
@@ -867,7 +903,8 @@ impl App {
             spans.push(Span::styled(format!("  ·  {}", self.ui.replay_tag), fg(Rgb(255.0, 200.0, 90.0)).add_modifier(Modifier::BOLD)));
         }
         let left = Line::from(spans);
-        let right = Line::from(Span::styled(format!("{} ", self.ui.keys), fg(DIM))).alignment(Alignment::Right);
+        let keys = if self.sees_all() { self.ui.keys } else { self.ui.keys_alive };
+        let right = Line::from(Span::styled(format!("{keys} "), fg(DIM))).alignment(Alignment::Right);
         f.render_widget(Paragraph::new(left).style(Style::new().bg(PANEL.color())), area);
         if area.width > 150 {
             f.render_widget(Paragraph::new(right), area);
@@ -1372,8 +1409,13 @@ mod tests {
             std::fs::create_dir_all(dir).unwrap();
             snapshot(terminal.backend().buffer(), &dir.join("p0-intro.ppm"));
         }
+        app.key(KeyCode::Esc);
+        assert!(app.confirm_quit && !app.quit, "Esc in the intro should ask before leaving a paid game");
+        app.key(KeyCode::Esc);
+        assert!(!app.confirm_quit && !app.quit && app.intro);
         app.key(KeyCode::Enter);
         let mut answered = 0;
+        let mut asked_to_leave = false;
         for _ in 0..60000 {
             app.tick(0.05);
             app.skip();
@@ -1395,6 +1437,23 @@ mod tests {
                     for c in "je suis innocent".chars() {
                         app.key(KeyCode::Char(c));
                     }
+                    if !asked_to_leave {
+                        asked_to_leave = true;
+                        app.key(KeyCode::Esc);
+                        assert!(app.confirm_quit && !app.quit);
+                        terminal.draw(|f| app.draw(f)).unwrap();
+                        let screen: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+                        assert!(screen.contains("QUITTER LA PARTIE"));
+                        if let Some(dir) = &shots {
+                            snapshot(terminal.backend().buffer(), &dir.join("p9-quit.ppm"));
+                        }
+                        app.key(KeyCode::Char('n'));
+                        assert!(!app.quit);
+                        assert!(
+                            matches!(&app.input, Some(Input::Speech { buffer, .. }) if buffer == "je suis innocent"),
+                            "going back keeps the line being typed"
+                        );
+                    }
                 }
                 app.key(KeyCode::Right);
                 app.key(KeyCode::Enter);
@@ -1404,6 +1463,7 @@ mod tests {
             if !app.sees_all() {
                 let screen: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
                 assert!(!screen.contains("veut dévorer") && !screen.contains("CONCILIABULE"), "a villager saw the wolves' night");
+                assert!(!screen.contains("[t] pensées"), "the asides key does nothing while the player is alive");
                 for w in &wolves {
                     let i = app.players.iter().position(|p| &p.name == w).unwrap();
                     assert!(!app.role_visible(i) || !app.alive[i], "a living wolf was unmasked");
@@ -1416,5 +1476,8 @@ mod tests {
         assert!(app.winner.is_some(), "the game should end");
         assert!(answered > 0, "the player should have been asked to act");
         assert!(app.sees_all());
+        assert!(asked_to_leave, "the player should have typed at least one line");
+        app.key(KeyCode::Char('q'));
+        assert!(app.quit, "once the game is over, q leaves at once");
     }
 }

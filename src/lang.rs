@@ -91,6 +91,9 @@ pub struct Ui {
     pub subtitle: &'static str,
     pub lineup_hint: &'static str,
     pub keys: &'static str,
+    pub keys_alive: &'static str,
+    pub quit_question: &'static str,
+    pub quit_hint: &'static str,
     pub paused: &'static str,
     pub too_small: &'static str,
     pub game_over_hint: &'static str,
@@ -177,6 +180,9 @@ pub static FR: Ui = Ui {
     subtitle: "Haiku, Sonnet, Opus et Fable jouent au loup-garou. Qui ment le mieux ?",
     lineup_hint: "Joueurs",
     keys: "[t] pensées  [r] rôles  [c] crt  [espace] pause  [→] passer  [+/-] vitesse  [q] quitter",
+    keys_alive: "[c] crt  [espace] pause  [→] passer  [+/-] vitesse  [q] quitter",
+    quit_question: "QUITTER LA PARTIE ?",
+    quit_hint: "Entrée pour quitter, Échap pour reprendre",
     paused: "PAUSE",
     too_small: "Agrandis ton terminal (100 x 30 minimum)",
     game_over_hint: "[q] quitter",
@@ -245,6 +251,9 @@ pub static EN: Ui = Ui {
     subtitle: "Haiku, Sonnet, Opus and Fable play werewolf. Who lies best?",
     lineup_hint: "Players",
     keys: "[t] thoughts  [r] roles  [c] crt  [space] pause  [→] skip  [+/-] speed  [q] quit",
+    keys_alive: "[c] crt  [space] pause  [→] skip  [+/-] speed  [q] quit",
+    quit_question: "LEAVE THE GAME?",
+    quit_hint: "Enter to leave, Esc to go back",
     paused: "PAUSED",
     too_small: "Make your terminal bigger (100 x 30 minimum)",
     game_over_hint: "[q] quit",
@@ -263,7 +272,7 @@ mod tests {
     fn copy_has_no_em_dash() {
         for ui in [&FR, &EN] {
             let mut all: Vec<&str> = ui.characters.iter().flat_map(|(n, p)| [*n, *p]).collect();
-            all.extend([ui.subtitle, ui.keys, ui.too_small, ui.press_enter]);
+            all.extend([ui.subtitle, ui.keys, ui.keys_alive, ui.quit_question, ui.quit_hint, ui.too_small, ui.press_enter]);
             for s in all {
                 assert!(!s.contains('\u{2014}'), "{s}");
             }

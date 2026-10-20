@@ -11,10 +11,37 @@ Does a bigger model lie better? Run a few games and see.
 
 [Version française](README.fr.md)
 
+## Install
+
+On macOS or Linux, the prebuilt binary:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/pcangemi/ccwolf/releases/latest/download/ccwolf-installer.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/pcangemi/ccwolf/releases/latest/download/ccwolf-installer.ps1 | iex"
+```
+
+With Homebrew:
+
+```sh
+brew install pcangemi/tap/ccwolf
+```
+
+With Cargo (Rust 1.85 or newer):
+
+```sh
+cargo install --locked --git https://github.com/pcangemi/ccwolf
+```
+
+The terminal must be at least 100 columns by 30 rows.
+
 ## Try it without a key
 
 ```sh
-cargo install --git https://github.com/pcangemi/ccwolf
 ccwolf --demo
 ```
 
@@ -43,7 +70,8 @@ ccwolf --play
 You get a random seat, a character and a secret role. Type your lines when it is your turn, pick
 your vote or your night action with the arrows. The models are not told which seat is human. While
 you are alive you only see what your role knows; die, or reach the end, and everything is
-revealed: every role, every aside, and how much Jev thought you lied.
+revealed: every role, every aside, and how much Jev thought you lied. `Esc` asks before leaving a
+game in progress, since the models are paid for each turn.
 
 ## The lie detector (optional)
 

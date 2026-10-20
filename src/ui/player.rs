@@ -122,10 +122,10 @@ impl Input {
 
     pub fn hint(&self, lang: Lang) -> &'static str {
         match (self, lang) {
-            (Input::Speech { .. }, Lang::Fr) => "Tape ta réplique, puis Entrée. Les IA ne savent pas qui est humain.",
-            (Input::Speech { .. }, Lang::En) => "Type your line, then Enter. The AIs do not know who is human.",
-            (_, Lang::Fr) => "Flèches pour choisir, Entrée pour valider.",
-            (_, Lang::En) => "Arrows to choose, Enter to confirm.",
+            (Input::Speech { .. }, Lang::Fr) => "Entrée pour envoyer, Échap pour quitter. Les IA ignorent qui est humain.",
+            (Input::Speech { .. }, Lang::En) => "Enter to send, Esc to leave. The AIs do not know who is human.",
+            (_, Lang::Fr) => "Flèches pour choisir, Entrée pour valider, Échap pour quitter.",
+            (_, Lang::En) => "Arrows to choose, Enter to confirm, Esc to leave.",
         }
     }
 }

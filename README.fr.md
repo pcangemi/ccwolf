@@ -11,10 +11,37 @@ Les plus gros modèles mentent-ils mieux ? Lancez quelques parties et voyez.
 
 [English version](README.md)
 
+## Installer
+
+Sur macOS ou Linux, le binaire prêt à l'emploi :
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/pcangemi/ccwolf/releases/latest/download/ccwolf-installer.sh | sh
+```
+
+Sur Windows, dans PowerShell :
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/pcangemi/ccwolf/releases/latest/download/ccwolf-installer.ps1 | iex"
+```
+
+Avec Homebrew :
+
+```sh
+brew install pcangemi/tap/ccwolf
+```
+
+Avec Cargo (Rust 1.85 ou plus récent) :
+
+```sh
+cargo install --locked --git https://github.com/pcangemi/ccwolf
+```
+
+Le terminal doit faire au moins 100 colonnes sur 30 lignes.
+
 ## Essayer sans clé
 
 ```sh
-cargo install --git https://github.com/pcangemi/ccwolf
 ccwolf --demo --lang fr
 ```
 
@@ -42,7 +69,8 @@ ccwolf --play
 Vous tirez une place, un personnage et un rôle secret. Tapez vos répliques à votre tour, choisissez
 votre vote ou votre action de nuit avec les flèches. Les modèles ne savent pas quel joueur est
 humain. Tant que vous êtes en vie, vous ne voyez que ce que votre rôle sait ; à votre mort, ou à la
-fin, tout se dévoile : les rôles, les apartés, et à quel point Jev vous a trouvé menteur.
+fin, tout se dévoile : les rôles, les apartés, et à quel point Jev vous a trouvé menteur. `Échap`
+demande confirmation avant de quitter une partie en cours, puisque chaque tour des modèles est payé.
 
 ## Le détecteur de mensonges (optionnel)
 
