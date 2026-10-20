@@ -19,6 +19,7 @@ pub struct VideoOptions {
     pub rows: u16,
     pub fps: u32,
     pub font: PathBuf,
+    pub italic_font: PathBuf,
     pub cell_w: usize,
     pub cell_h: usize,
     pub title_seconds: f32,
@@ -26,33 +27,30 @@ pub struct VideoOptions {
 }
 
 struct Faces {
-    fonts: Vec<Font>,
+    regular: Font,
+    italic: Font,
     px: f32,
     ascent: f32,
-    cache: HashMap<(char, usize), (Metrics, Vec<u8>)>,
+    cache: HashMap<(char, bool), (Metrics, Vec<u8>)>,
 }
 
 impl Faces {
-    fn load(path: &PathBuf, cell_h: usize) -> Result<Faces, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let px = cell_h as f32 * 0.72;
-        let mut fonts = Vec::new();
-        for index in 0..4 {
-            let settings = FontSettings { collection_index: index, scale: px, ..FontSettings::default() };
-            match Font::from_bytes(bytes.as_slice(), settings) {
-                Ok(f) => fonts.push(f),
-                Err(_) if index > 0 => fonts.push(fonts[0].clone()),
-                Err(e) => return Err(format!("{}: {e}", path.display())),
-            }
-        }
-        let lines = fonts[0].horizontal_line_metrics(px).ok_or("the font has no horizontal metrics")?;
+    fn load(regular: &PathBuf, italic: &PathBuf, cell_h: usize) -> Result<Faces, String> {
+        let px = cell_h as f32 * 0.70;
+        let open = |path: &PathBuf| -> Result<Font, String> {
+            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            Font::from_bytes(bytes, FontSettings { scale: px, ..FontSettings::default() }).map_err(|e| format!("{}: {e}", path.display()))
+        };
+        let regular_font = open(regular)?;
+        let italic_font = open(italic).unwrap_or_else(|_| regular_font.clone());
+        let lines = regular_font.horizontal_line_metrics(px).ok_or("the font has no horizontal metrics")?;
         let ascent = lines.ascent + ((cell_h as f32) - (lines.ascent - lines.descent)) / 2.0;
-        Ok(Faces { fonts, px, ascent, cache: HashMap::new() })
+        Ok(Faces { regular: regular_font, italic: italic_font, px, ascent, cache: HashMap::new() })
     }
 
-    fn glyph(&mut self, ch: char, face: usize) -> &(Metrics, Vec<u8>) {
-        let (fonts, px) = (&self.fonts, self.px);
-        self.cache.entry((ch, face)).or_insert_with(|| fonts[face].rasterize(ch, px))
+    fn glyph(&mut self, ch: char, italic: bool) -> &(Metrics, Vec<u8>) {
+        let (font, px) = (if italic { &self.italic } else { &self.regular }, self.px);
+        self.cache.entry((ch, italic)).or_insert_with(|| font.rasterize(ch, px))
     }
 }
 
@@ -149,28 +147,24 @@ fn draw_cell(frame: &mut Frame, faces: &mut Faces, cell: &Cell, x0: usize, y0: u
     }
     let bold = cell.modifier.contains(Modifier::BOLD);
     let italic = cell.modifier.contains(Modifier::ITALIC);
-    let face = match (bold, italic) {
-        (false, false) => 0,
-        (true, false) => 1,
-        (false, true) => 2,
-        (true, true) => 3,
-    };
     let ascent = faces.ascent;
-    let (metrics, coverage) = faces.glyph(sym, face).clone();
+    let (metrics, coverage) = faces.glyph(sym, italic).clone();
     let gx = x0 as i32 + metrics.xmin + ((cw as i32 - metrics.advance_width.round() as i32) / 2).max(0);
     let gy = y0 as i32 + ascent.round() as i32 - metrics.height as i32 - metrics.ymin;
-    for row in 0..metrics.height {
-        for col in 0..metrics.width {
-            let a = coverage[row * metrics.width + col] as f32 / 255.0;
-            if a <= 0.0 {
-                continue;
+    for dx in if bold { 0..2 } else { 0..1 } {
+        for row in 0..metrics.height {
+            for col in 0..metrics.width {
+                let a = coverage[row * metrics.width + col] as f32 / 255.0;
+                if a <= 0.0 {
+                    continue;
+                }
+                let (x, y) = (gx + col as i32 + dx, gy + row as i32);
+                if x < 0 || y < 0 || x as usize >= frame.w || y as usize >= frame.h {
+                    continue;
+                }
+                let under = frame.get(x as usize, y as usize);
+                frame.put(x as usize, y as usize, under.mix(fg, a));
             }
-            let (x, y) = (gx + col as i32, gy + row as i32);
-            if x < 0 || y < 0 || x as usize >= frame.w || y as usize >= frame.h {
-                continue;
-            }
-            let under = frame.get(x as usize, y as usize);
-            frame.put(x as usize, y as usize, under.mix(fg, a));
         }
     }
     if cell.modifier.contains(Modifier::CROSSED_OUT) {
@@ -210,7 +204,7 @@ pub fn render(events: Vec<Event>, opts: Options, video: VideoOptions) -> Result<
         Some(Event::Setup { players, .. }) => players.clone(),
         _ => return Err("not a ccwolf game".into()),
     };
-    let mut faces = Faces::load(&video.font, video.cell_h)?;
+    let mut faces = Faces::load(&video.font, &video.italic_font, video.cell_h)?;
     let (w, h) = (video.cols as usize * video.cell_w, video.rows as usize * video.cell_h);
     let mut frame = Frame { w, h, px: vec![0; w * h * 3] };
     let mut ffmpeg = Command::new("ffmpeg")

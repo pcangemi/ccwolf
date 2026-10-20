@@ -717,7 +717,13 @@ impl App {
             && self.speaker == p.who
             && matches!(p.title.as_str(), t if t.starts_with(self.ui.village_square) || t == self.ui.wolf_council || t == self.ui.last_words)
         {
-            crate::prompts::quote(self.lang, &said)
+            let quoted = crate::prompts::quote(self.lang, &said);
+            if typed >= p.say.chars().count() {
+                quoted
+            } else {
+                let closing = if self.lang == Lang::Fr { 2 } else { 1 };
+                quoted.chars().take(quoted.chars().count().saturating_sub(closing)).collect()
+            }
         } else {
             said
         };
