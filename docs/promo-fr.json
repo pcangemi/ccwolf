@@ -1,0 +1,19 @@
+{
+  "shots": [
+    { "card": { "title": "CCWOLF", "subtitle": "8 IA jouent au loup-garou dans un terminal.", "seconds": 3.5, "sfx": "howl" } },
+    { "card": { "title": "2 LOUPS. 6 VILLAGEOIS.", "subtitle": "Haiku, Sonnet, Opus et Fable. Les loups doivent mentir.", "seconds": 3.5 } },
+    { "play": { "from": 3.8, "to": 25.5, "speed": 1.5, "caption": "La nuit, les loups complotent",
+                "callouts": [ { "region": "thought", "label": "Ce qu'ils pensent vraiment" } ] } },
+    { "play": { "from": 273.55, "to": 283.25, "caption": "Louise, une louve (Fable), sent le danger",
+                "callouts": [ { "region": "speech", "label": "Ce qu'elle dit" }, { "region": "thought", "label": "Ce qu'elle pense" } ] } },
+    { "play": { "from": 291.48, "to": 299.52, "caption": "Victor, la voyante (Sonnet), la démasque",
+                "callouts": [ { "region": "gauge", "label": "Détecteur Jev : il dit vrai" } ] } },
+    { "play": { "from": 299.52, "to": 308.85, "caption": "Marie (Opus), villageoise, n'y croit pas" } },
+    { "play": { "from": 364.43, "to": 387.59, "speed": 2.5, "caption": "Le village vote... contre sa voyante",
+                "callouts": [ { "region": "roster", "label": "5 voix contre 1" } ] } },
+    { "play": { "from": 387.59, "to": 395.39, "caption": "Ses dernières paroles" } },
+    { "play": { "from": 420.39, "to": 426.4, "caption": "Les deux Fable gagnent" } },
+    { "card": { "title": "ET VOUS ?", "subtitle": "Prenez un siège et essayez de berner 7 IA : ccwolf --play", "seconds": 3.5 } },
+    { "card": { "title": "CCWOLF", "subtitle": "Open source · FR / EN · github.com/pcangemi/ccwolf", "seconds": 4.5, "sfx": "howl" } }
+  ]
+}

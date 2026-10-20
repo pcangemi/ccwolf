@@ -385,6 +385,10 @@ impl Scene<'_> {
 }
 
 pub fn title(area: Rect, buf: &mut Buffer, t: f32) -> i32 {
+    title_with(area, buf, t, "CCWOLF")
+}
+
+pub fn title_with(area: Rect, buf: &mut Buffer, t: f32, text: &str) -> i32 {
     let mut c = Canvas::new(area.width, area.height);
     let horizon = (c.h as f32 * 0.78) as i32;
     sky(&mut c, horizon, 1.0, t);
@@ -428,8 +432,7 @@ pub fn title(area: Rect, buf: &mut Buffer, t: f32) -> i32 {
         }
     }
     fog(&mut c, horizon - 6, 1.0, t);
-    let text = "CCWOLF";
-    let scale = if text_width(text, 3) + 6 <= c.w { 3 } else { 2 };
+    let scale = (1..=3).rev().find(|s| text_width(text, *s) + 6 <= c.w).unwrap_or(1);
     let tw = text_width(text, scale);
     let (tx, ty) = ((c.w - tw) / 2, (my - 3.5 * scale as f32) as i32);
     let ink = |_: i32, _: i32| Rgb(8.0, 5.0, 16.0);

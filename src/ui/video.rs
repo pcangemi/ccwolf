@@ -26,16 +26,16 @@ pub struct VideoOptions {
     pub tail_seconds: f32,
 }
 
-struct Faces {
+pub struct Faces {
     regular: Font,
     italic: Font,
     px: f32,
     ascent: f32,
-    cache: HashMap<(char, bool), (Metrics, Vec<u8>)>,
+    cache: HashMap<(char, u32, bool), (Metrics, Vec<u8>)>,
 }
 
 impl Faces {
-    fn load(regular: &PathBuf, italic: &PathBuf, cell_h: usize) -> Result<Faces, String> {
+    pub fn load(regular: &PathBuf, italic: &PathBuf, cell_h: usize) -> Result<Faces, String> {
         let px = cell_h as f32 * 0.70;
         let open = |path: &PathBuf| -> Result<Font, String> {
             let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -49,19 +49,52 @@ impl Faces {
     }
 
     fn glyph(&mut self, ch: char, italic: bool) -> &(Metrics, Vec<u8>) {
-        let (font, px) = (if italic { &self.italic } else { &self.regular }, self.px);
-        self.cache.entry((ch, italic)).or_insert_with(|| font.rasterize(ch, px))
+        let px = self.px;
+        self.glyph_at(ch, px, italic)
+    }
+
+    fn glyph_at(&mut self, ch: char, px: f32, italic: bool) -> &(Metrics, Vec<u8>) {
+        let font = if italic { &self.italic } else { &self.regular };
+        self.cache.entry((ch, px.to_bits(), italic)).or_insert_with(|| font.rasterize(ch, px))
+    }
+
+    pub fn measure(&mut self, text: &str, px: f32) -> f32 {
+        text.chars().map(|c| self.glyph_at(c, px, false).0.advance_width).sum()
+    }
+
+    pub fn text(&mut self, frame: &mut Frame, x: usize, y: usize, text: &str, px: f32, color: Rgb) {
+        let ascent = self.regular.horizontal_line_metrics(px).map(|m| m.ascent).unwrap_or(px * 0.8);
+        let mut pen = x as f32;
+        for ch in text.chars() {
+            let (metrics, coverage) = self.glyph_at(ch, px, false).clone();
+            let gx = pen.round() as i32 + metrics.xmin;
+            let gy = y as i32 + ascent.round() as i32 - metrics.height as i32 - metrics.ymin;
+            for dx in 0..2 {
+                for row in 0..metrics.height {
+                    for col in 0..metrics.width {
+                        let a = coverage[row * metrics.width + col] as f32 / 255.0;
+                        let (px_x, px_y) = (gx + col as i32 + dx, gy + row as i32);
+                        if a <= 0.0 || px_x < 0 || px_y < 0 || px_x as usize >= frame.w || px_y as usize >= frame.h {
+                            continue;
+                        }
+                        let under = frame.get(px_x as usize, px_y as usize);
+                        frame.put(px_x as usize, px_y as usize, under.mix(color, a));
+                    }
+                }
+            }
+            pen += metrics.advance_width;
+        }
     }
 }
 
-struct Frame {
-    w: usize,
-    h: usize,
-    px: Vec<u8>,
+pub struct Frame {
+    pub w: usize,
+    pub h: usize,
+    pub px: Vec<u8>,
 }
 
 impl Frame {
-    fn put(&mut self, x: usize, y: usize, c: Rgb) {
+    pub fn put(&mut self, x: usize, y: usize, c: Rgb) {
         if x < self.w && y < self.h {
             let i = (y * self.w + x) * 3;
             self.px[i] = c.0.clamp(0.0, 255.0) as u8;
@@ -70,12 +103,12 @@ impl Frame {
         }
     }
 
-    fn get(&self, x: usize, y: usize) -> Rgb {
+    pub fn get(&self, x: usize, y: usize) -> Rgb {
         let i = (y * self.w + x) * 3;
         Rgb(self.px[i] as f32, self.px[i + 1] as f32, self.px[i + 2] as f32)
     }
 
-    fn rect(&mut self, x0: usize, y0: usize, w: usize, h: usize, c: Rgb) {
+    pub fn rect(&mut self, x0: usize, y0: usize, w: usize, h: usize, c: Rgb) {
         for y in y0..y0 + h {
             for x in x0..x0 + w {
                 self.put(x, y, c);
@@ -172,7 +205,7 @@ fn draw_cell(frame: &mut Frame, faces: &mut Faces, cell: &Cell, x0: usize, y0: u
     }
 }
 
-fn rasterize(buf: &Buffer, faces: &mut Faces, frame: &mut Frame, cw: usize, ch: usize) {
+pub fn rasterize(buf: &Buffer, faces: &mut Faces, frame: &mut Frame, cw: usize, ch: usize) {
     for row in 0..buf.area.height {
         for col in 0..buf.area.width {
             if let Some(cell) = buf.cell((col, row)) {

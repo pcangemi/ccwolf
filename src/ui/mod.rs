@@ -1,6 +1,10 @@
 pub mod canvas;
 pub mod player;
+#[cfg(feature = "video")]
+pub mod promo;
 pub mod scene;
+#[cfg(feature = "video")]
+pub mod sound;
 #[cfg(feature = "video")]
 pub mod video;
 

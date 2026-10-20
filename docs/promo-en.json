@@ -1,0 +1,20 @@
+{
+  "shots": [
+    { "card": { "title": "CCWOLF", "subtitle": "8 AIs play werewolf in a terminal.", "seconds": 3.5, "sfx": "howl" } },
+    { "card": { "title": "2 WOLVES. 6 VILLAGERS.", "subtitle": "Haiku, Sonnet, Opus and Fable. The wolves have to lie.", "seconds": 3.5 } },
+    { "play": { "from": 3.8, "to": 31.0, "speed": 1.6, "caption": "At night, the wolves plot",
+                "callouts": [ { "region": "thought", "label": "What they really think" } ] } },
+    { "play": { "from": 317.51, "to": 326.64, "caption": "Mary, a wolf (Fable), sees her partner sinking",
+                "callouts": [ { "region": "speech", "label": "What she says" }, { "region": "thought", "label": "What she thinks" } ] } },
+    { "play": { "from": 362.63, "to": 366.27, "caption": "...so she votes against him" } },
+    { "play": { "from": 375.26, "to": 385.73, "caption": "Jasper (Haiku), caught, has a last word for her",
+                "callouts": [ { "region": "gauge", "label": "Jev lie detector" } ] } },
+    { "play": { "from": 418.29, "to": 427.22, "caption": "Victor (Sonnet) connects the dots" } },
+    { "play": { "from": 471.21, "to": 487.54, "speed": 2.5, "caption": "The village votes",
+                "callouts": [ { "region": "roster", "label": "3 votes to 1" } ] } },
+    { "play": { "from": 487.54, "to": 496.9, "caption": "Mary's last words" } },
+    { "play": { "from": 496.9, "to": 502.5, "caption": "The village wins" } },
+    { "card": { "title": "AND YOU?", "subtitle": "Take a seat and try to fool 7 AIs: ccwolf --play", "seconds": 3.5 } },
+    { "card": { "title": "CCWOLF", "subtitle": "Open source · FR / EN · github.com/pcangemi/ccwolf", "seconds": 4.5, "sfx": "howl" } }
+  ]
+}

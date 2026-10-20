@@ -77,6 +77,7 @@ struct Args {
     force: bool,
     video: Option<PathBuf>,
     play: bool,
+    promo: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
@@ -100,6 +101,7 @@ fn parse_args() -> Result<Option<Args>, String> {
         force: false,
         video: None,
         play: false,
+        promo: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -122,6 +124,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--replay" => args.replay = Some(PathBuf::from(value("--replay")?)),
             "--no-crt" => args.crt = false,
             "--video" => args.video = Some(PathBuf::from(value("--video")?)),
+            "--promo" => args.promo = Some(PathBuf::from(value("--promo")?)),
             "--demo" => args.demo = true,
             "--play" => args.play = true,
             "--headless" => args.headless = true,
@@ -234,7 +237,7 @@ fn headless(args: &Args) -> Result<(), String> {
 }
 
 #[cfg(feature = "video")]
-fn video(events: Vec<Event>, options: ui::Options, out: &std::path::Path) -> Result<(), String> {
+fn video(events: Vec<Event>, options: ui::Options, out: &std::path::Path, promo: Option<&std::path::Path>) -> Result<(), String> {
     let video = ui::video::VideoOptions {
         out: out.to_path_buf(),
         cols: 192,
@@ -247,11 +250,14 @@ fn video(events: Vec<Event>, options: ui::Options, out: &std::path::Path) -> Res
         title_seconds: 3.0,
         tail_seconds: 6.0,
     };
-    ui::video::render(events, options, video)
+    match promo {
+        Some(board) => ui::promo::render(events, options, video, board),
+        None => ui::video::render(events, options, video),
+    }
 }
 
 #[cfg(not(feature = "video"))]
-fn video(_: Vec<Event>, _: ui::Options, _: &std::path::Path) -> Result<(), String> {
+fn video(_: Vec<Event>, _: ui::Options, _: &std::path::Path, _: Option<&std::path::Path>) -> Result<(), String> {
     Err("this build has no video support: cargo build --release --features video".into())
 }
 
@@ -276,7 +282,7 @@ fn watch(args: Args) -> Result<(), String> {
             _ => args.lang,
         };
         if let Some(out) = &args.video {
-            return video(events, options(lang, true), out);
+            return video(events, options(lang, true), out, args.promo.as_deref());
         }
         return ui::run(ui::Source::Replay(events), options(lang, true)).map_err(screen_error);
     }

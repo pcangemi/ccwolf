@@ -33,6 +33,17 @@ Une partie mixte coûte environ 0,80 $, surtout pour Fable. Une partie avec huit
 environ 0,02 $. Le coût s'affiche en direct en haut de l'écran. `--effort low` fait moins
 réfléchir les modèles, pour une partie moins chère et plus rapide.
 
+## Jouer contre eux
+
+```sh
+ccwolf --play
+```
+
+Vous tirez une place, un personnage et un rôle secret. Tapez vos répliques à votre tour, choisissez
+votre vote ou votre action de nuit avec les flèches. Les modèles ne savent pas quel joueur est
+humain. Tant que vous êtes en vie, vous ne voyez que ce que votre rôle sait ; à votre mort, ou à la
+fin, tout se dévoile : les rôles, les apartés, et à quel point Jev vous a trouvé menteur.
+
 ## Le détecteur de mensonges (optionnel)
 
 Avec une clé [TypeSafe](https://typesafe.ai), chaque prise de parole publique part chez Jev, un
@@ -100,7 +111,6 @@ machine.
 
 ## La suite
 
-- Prendre vous-même un siège et essayer de berner sept modèles.
 - D'autres joueurs à la table : Mistral, OpenAI, OpenRouter, et des modèles locaux via Ollama.
 
 ## Licence

@@ -34,6 +34,17 @@ A mixed game costs about $0.80, most of it for Fable. An all-Haiku game costs ab
 The running cost is shown at the top of the screen. `--effort low` makes the models think less,
 for a cheaper and faster game.
 
+## Play against them
+
+```sh
+ccwolf --play
+```
+
+You get a random seat, a character and a secret role. Type your lines when it is your turn, pick
+your vote or your night action with the arrows. The models are not told which seat is human. While
+you are alive you only see what your role knows; die, or reach the end, and everything is
+revealed: every role, every aside, and how much Jev thought you lied.
+
 ## The lie detector (optional)
 
 With a [TypeSafe](https://typesafe.ai) key, every public speech goes to Jev, a model that answers
@@ -94,7 +105,6 @@ to Anthropic, and to TypeSafe if you set its key. Recordings stay on your machin
 
 ## Next
 
-- Take a seat yourself and try to fool seven models.
 - More players at the table: Mistral, OpenAI, OpenRouter, and local models through Ollama.
 
 ## License
