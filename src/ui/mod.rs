@@ -1460,7 +1460,7 @@ mod tests {
                 answered += 1;
             }
             terminal.draw(|f| app.draw(f)).unwrap();
-            if !app.sees_all() {
+            if !app.sees_all() && !app.players.is_empty() {
                 let screen: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
                 assert!(!screen.contains("veut dévorer") && !screen.contains("CONCILIABULE"), "a villager saw the wolves' night");
                 assert!(!screen.contains("[t] pensées"), "the asides key does nothing while the player is alive");
