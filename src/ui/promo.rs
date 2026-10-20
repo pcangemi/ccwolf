@@ -175,6 +175,8 @@ fn sfx_for(e: &Event) -> Vec<Sfx> {
     }
 }
 
+const MUSIC_LEVEL: f32 = 0.6;
+
 pub fn render(events: Vec<Event>, opts: Options, video: VideoOptions, storyboard: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(storyboard).map_err(|e| format!("{}: {e}", storyboard.display()))?;
     let board: Storyboard = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", storyboard.display()))?;
@@ -287,7 +289,9 @@ pub fn render(events: Vec<Event>, opts: Options, video: VideoOptions, storyboard
     }
 
     let mut mix = Mix::new(total + 1.0);
-    mix.music(0.0, total);
+    if video.music.is_none() {
+        mix.music(0.0, total);
+    }
     let mut last_blip = -1.0;
     for (at, s) in cues {
         if s == Sfx::Blip && at - last_blip < 0.12 {
@@ -300,12 +304,17 @@ pub fn render(events: Vec<Event>, opts: Options, video: VideoOptions, storyboard
     }
     let wav: PathBuf = video.out.with_extension("wav");
     mix.write_wav(&wav)?;
-    let status = Command::new("ffmpeg")
-        .args(["-y", "-loglevel", "error", "-i"])
-        .arg(&silent)
-        .arg("-i")
-        .arg(&wav)
-        .args(["-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart"])
+    let mut mux = Command::new("ffmpeg");
+    mux.args(["-y", "-loglevel", "error", "-i"]).arg(&silent).arg("-i").arg(&wav);
+    if let Some(track) = &video.music {
+        let filter = format!(
+            "[2:a]atrim=0:{total:.2},afade=t=in:d=1.5,afade=t=out:st={:.2}:d=3,volume={MUSIC_LEVEL}[m];[1:a][m]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[a]",
+            (total - 3.0).max(0.0)
+        );
+        mux.arg("-i").arg(track).args(["-filter_complex", &filter, "-map", "0:v", "-map", "[a]"]);
+    }
+    let status = mux
+        .args(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart"])
         .arg(&video.out)
         .status()
         .map_err(|e| e.to_string())?;

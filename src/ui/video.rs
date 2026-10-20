@@ -15,6 +15,7 @@ use crate::game::Event;
 
 pub struct VideoOptions {
     pub out: PathBuf,
+    pub music: Option<PathBuf>,
     pub cols: u16,
     pub rows: u16,
     pub fps: u32,
